@@ -1,0 +1,1 @@
+//! Chat render cache.
