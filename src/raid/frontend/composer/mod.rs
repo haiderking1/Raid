@@ -10,14 +10,17 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub mod slash_commands;
 
+const MAX_VISIBLE_LINES: usize = 8;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ComposerState {
     text: String,
     cursor: usize,
+    vertical_column: Option<usize>,
 }
 
 impl ComposerState {
-    pub fn handle_key(&mut self, key: KeyEvent) -> ComposerAction {
+    pub fn handle_key_with_width(&mut self, key: KeyEvent, content_width: usize) -> ComposerAction {
         if key.kind != KeyEventKind::Press {
             return ComposerAction::None;
         }
@@ -28,6 +31,10 @@ impl ComposerState {
                 && !key.modifiers.contains(KeyModifiers::ALT))
         {
             return ComposerAction::Quit;
+        }
+
+        if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            self.vertical_column = None;
         }
 
         match key.code {
@@ -58,16 +65,43 @@ impl ComposerState {
                 self.cursor = next_grapheme_boundary(&self.text, self.cursor);
                 ComposerAction::None
             }
+            KeyCode::Up => {
+                let column = self.vertical_column.unwrap_or_else(|| {
+                    cursor_visual_column(&self.text, self.cursor, content_width)
+                });
+                self.cursor = move_vertical(&self.text, self.cursor, content_width, true, column);
+                self.vertical_column = Some(column);
+                ComposerAction::None
+            }
+            KeyCode::Down => {
+                let column = self.vertical_column.unwrap_or_else(|| {
+                    cursor_visual_column(&self.text, self.cursor, content_width)
+                });
+                self.cursor = move_vertical(&self.text, self.cursor, content_width, false, column);
+                self.vertical_column = Some(column);
+                ComposerAction::None
+            }
             KeyCode::Home => {
-                self.cursor = 0;
+                self.cursor = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    0
+                } else {
+                    visual_line_start(&self.text, self.cursor, content_width)
+                };
                 ComposerAction::None
             }
             KeyCode::End => {
-                self.cursor = self.text.len();
+                self.cursor = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.text.len()
+                } else {
+                    visual_line_end(&self.text, self.cursor, content_width)
+                };
                 ComposerAction::None
             }
             KeyCode::Enter => {
-                if self.text.is_empty() {
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    self.insert_character('\n');
+                    ComposerAction::None
+                } else if self.text.trim().is_empty() {
                     ComposerAction::None
                 } else {
                     let submitted = std::mem::take(&mut self.text);
@@ -87,18 +121,40 @@ impl ComposerState {
                     if characters.peek() == Some(&'\n') {
                         characters.next();
                     }
-                    self.insert_character(' ');
+                    self.insert_character('\n');
                 }
-                '\n' | '\u{2028}' | '\u{2029}' => self.insert_character(' '),
+                '\n' | '\u{2028}' | '\u{2029}' => self.insert_character('\n'),
+                '\t' => {
+                    for _ in 0..4 {
+                        self.insert_character(' ');
+                    }
+                }
                 character if character.is_control() => {}
                 character => self.insert_character(character),
             }
         }
     }
 
+    pub fn desired_height(&self, content_width: usize, max_height: u16) -> u16 {
+        if max_height < 3 {
+            return max_height;
+        }
+        let max_lines = usize::from(max_height.saturating_sub(2)).clamp(1, MAX_VISIBLE_LINES);
+        let line_count = visual_lines_for_cursor(&self.text, self.cursor, content_width).len();
+        (line_count.min(max_lines) + 2) as u16
+    }
+
     fn insert_character(&mut self, character: char) {
         self.text.insert(self.cursor, character);
         self.cursor += character.len_utf8();
+        self.vertical_column = None;
+    }
+}
+
+#[cfg(test)]
+impl ComposerState {
+    fn handle_key(&mut self, key: KeyEvent) -> ComposerAction {
+        self.handle_key_with_width(key, usize::MAX)
     }
 }
 
@@ -120,27 +176,27 @@ impl<'a> ComposerWidget<'a> {
 
     pub fn cursor_position(area: Rect, state: &ComposerState) -> Option<(u16, u16)> {
         let inner = Self::block().inner(area);
-        if inner.width < 2 || inner.height == 0 {
+        let content_width = inner.width.saturating_sub(2) as usize;
+        if content_width == 0 || inner.height == 0 {
             return None;
         }
 
         let text_x = inner.x.saturating_add(2);
-        let right = inner.x.saturating_add(inner.width);
-        let available_width = right.saturating_sub(text_x) as usize;
-        if available_width == 0 {
-            return None;
-        }
-
-        let cursor = state.cursor.min(state.text.len());
-        let (start, _) = visible_window(&state.text, cursor, available_width);
-        let cursor_width = Line::from(&state.text[start..cursor]).width();
+        let layout = ComposerLayout::new(
+            &state.text,
+            state.cursor.min(state.text.len()),
+            content_width,
+            inner.height as usize,
+        );
+        let cursor_row = layout.cursor_line.saturating_sub(layout.scroll_top);
         let cursor_x = text_x.saturating_add(
-            cursor_width
-                .min(available_width.saturating_sub(1))
+            layout
+                .cursor_width
+                .min(content_width.saturating_sub(1))
                 .try_into()
                 .unwrap_or(u16::MAX),
         );
-        Some((cursor_x, inner.y + inner.height / 2))
+        Some((cursor_x, inner.y + cursor_row as u16))
     }
 
     fn block() -> Block<'static> {
@@ -157,32 +213,56 @@ impl Widget for ComposerWidget<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        if inner.width < 2 || inner.height == 0 {
+        let content_width = inner.width.saturating_sub(2) as usize;
+        if content_width == 0 || inner.height == 0 {
             return;
         }
 
-        let y = inner.y + inner.height / 2;
         let text_x = inner.x.saturating_add(2);
-        let right = inner.x.saturating_add(inner.width);
-        let available_width = right.saturating_sub(text_x) as usize;
-        if available_width == 0 {
-            return;
-        }
-
         let prompt_style = Style::default().fg(Color::Rgb(190, 190, 190));
         let text_style = Style::default().fg(Color::White);
-        buf.set_string(inner.x, y, ">", prompt_style);
-
-        let cursor = self.state.cursor.min(self.state.text.len());
-        let (start, end) = visible_window(&self.state.text, cursor, available_width);
-        buf.set_stringn(
-            text_x,
-            y,
-            &self.state.text[start..end],
-            available_width,
-            text_style,
+        let layout = ComposerLayout::new(
+            &self.state.text,
+            self.state.cursor.min(self.state.text.len()),
+            content_width,
+            inner.height as usize,
         );
+
+        for (row, line) in layout
+            .lines
+            .iter()
+            .skip(layout.scroll_top)
+            .take(inner.height as usize)
+            .enumerate()
+        {
+            render_text_line(
+                buf,
+                text_x,
+                inner.y + row as u16,
+                &self.state.text[line.start..line.end],
+                content_width,
+                text_style,
+            );
+        }
+        buf.set_string(inner.x, inner.y, ">", prompt_style);
     }
+}
+
+fn render_text_line(buf: &mut Buffer, x: u16, y: u16, text: &str, width: usize, style: Style) {
+    let mut visible = String::new();
+    let mut used_width = 0;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = Line::from(grapheme).width();
+        if used_width + grapheme_width > width {
+            if used_width == 0 {
+                visible.push('…');
+            }
+            break;
+        }
+        visible.push_str(grapheme);
+        used_width += grapheme_width;
+    }
+    buf.set_stringn(x, y, &visible, width, style);
 }
 
 fn accepts_character(character: char, modifiers: KeyModifiers) -> bool {
@@ -206,46 +286,180 @@ fn next_grapheme_boundary(text: &str, cursor: usize) -> usize {
         .map_or(cursor, |grapheme| cursor + grapheme.len())
 }
 
-fn visible_window(text: &str, cursor: usize, width: usize) -> (usize, usize) {
-    if width == 0 {
-        return (cursor, cursor);
-    }
+fn cursor_visual_column(text: &str, cursor: usize, width: usize) -> usize {
+    let lines = visual_lines_for_cursor(text, cursor, width);
+    let line = lines[cursor_line(&lines, cursor)];
+    Line::from(&text[line.start..cursor.min(line.end)]).width()
+}
 
-    let mut start = 0;
-    let mut cursor_width = Line::from(&text[..cursor]).width();
-    while cursor_width >= width && start < cursor {
-        let grapheme = text[start..]
-            .graphemes(true)
-            .next()
-            .expect("start is before cursor");
-        let next = start + grapheme.len();
-        cursor_width = cursor_width.saturating_sub(Line::from(grapheme).width());
-        start = next;
-    }
+fn visual_line_start(text: &str, cursor: usize, width: usize) -> usize {
+    let lines = visual_lines_for_cursor(text, cursor, width);
+    lines[cursor_line(&lines, cursor)].start
+}
 
-    let mut end = start;
-    let mut used_width = 0;
-    for (offset, grapheme) in text[start..].grapheme_indices(true) {
-        let next = start + offset + grapheme.len();
+fn visual_line_end(text: &str, cursor: usize, width: usize) -> usize {
+    let lines = visual_lines_for_cursor(text, cursor, width);
+    lines[cursor_line(&lines, cursor)].end
+}
+
+fn move_vertical(text: &str, cursor: usize, width: usize, up: bool, column: usize) -> usize {
+    let lines = visual_lines_for_cursor(text, cursor, width);
+    let current_line = cursor_line(&lines, cursor);
+    let target_line = if up {
+        current_line.checked_sub(1)
+    } else {
+        current_line
+            .checked_add(1)
+            .filter(|&line| line < lines.len())
+    };
+
+    target_line.map_or(cursor, |line| {
+        position_in_line(text, lines[line].start, lines[line].end, column)
+    })
+}
+
+fn position_in_line(text: &str, start: usize, end: usize, column: usize) -> usize {
+    let mut position = start;
+    let mut width = 0;
+    for (offset, grapheme) in text[start..end].grapheme_indices(true) {
         let grapheme_width = Line::from(grapheme).width();
-        if used_width + grapheme_width > width {
+        if width + grapheme_width > column {
             break;
         }
-        used_width += grapheme_width;
-        end = next;
+        width += grapheme_width;
+        position = start + offset + grapheme.len();
+    }
+    position
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VisualLine {
+    start: usize,
+    end: usize,
+    width: usize,
+}
+
+fn visual_lines(text: &str, width: usize) -> Vec<VisualLine> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut logical_start = 0;
+
+    for logical_line in text.split('\n') {
+        let logical_end = logical_start + logical_line.len();
+        if logical_line.is_empty() {
+            lines.push(VisualLine {
+                start: logical_start,
+                end: logical_end,
+                width: 0,
+            });
+        } else {
+            let mut segment_start = logical_start;
+            let mut segment_width = 0;
+            for (offset, grapheme) in logical_line.grapheme_indices(true) {
+                let grapheme_width = Line::from(grapheme).width();
+                if segment_width > 0 && segment_width + grapheme_width > width {
+                    lines.push(VisualLine {
+                        start: segment_start,
+                        end: logical_start + offset,
+                        width: segment_width,
+                    });
+                    segment_start = logical_start + offset;
+                    segment_width = 0;
+                }
+                segment_width += grapheme_width;
+            }
+            lines.push(VisualLine {
+                start: segment_start,
+                end: logical_end,
+                width: segment_width,
+            });
+        }
+        logical_start = logical_end + '\n'.len_utf8();
     }
 
-    (start, end)
+    lines
+}
+
+fn visual_lines_for_cursor(text: &str, cursor: usize, width: usize) -> Vec<VisualLine> {
+    let mut lines = visual_lines(text, width);
+    let width = width.max(1);
+    let cursor = cursor.min(text.len());
+    let current_line = cursor_line(&lines, cursor);
+    let line = lines[current_line];
+    let is_soft_wrap = lines
+        .get(current_line + 1)
+        .is_some_and(|next| next.start == cursor);
+    if cursor == line.end
+        && line.width >= width
+        && !is_soft_wrap
+        && !text[cursor..].starts_with('\n')
+    {
+        lines.insert(
+            current_line + 1,
+            VisualLine {
+                start: cursor,
+                end: cursor,
+                width: 0,
+            },
+        );
+    }
+    lines
+}
+
+struct ComposerLayout {
+    lines: Vec<VisualLine>,
+    cursor_line: usize,
+    cursor_width: usize,
+    scroll_top: usize,
+}
+
+impl ComposerLayout {
+    fn new(text: &str, cursor: usize, content_width: usize, visible_height: usize) -> Self {
+        let lines = visual_lines_for_cursor(text, cursor, content_width);
+        let cursor_line = cursor_line(&lines, cursor);
+        let visible_height = visible_height.max(1).min(lines.len());
+        let scroll_top = cursor_line.saturating_sub(visible_height - 1);
+        let line = lines[cursor_line];
+        let cursor_width = Line::from(&text[line.start..cursor.min(line.end)]).width();
+
+        Self {
+            lines,
+            cursor_line,
+            cursor_width,
+            scroll_top,
+        }
+    }
+}
+
+fn cursor_line(lines: &[VisualLine], cursor: usize) -> usize {
+    for (index, line) in lines.iter().enumerate() {
+        if cursor < line.end {
+            return index;
+        }
+        if cursor == line.end {
+            let is_soft_wrap = lines
+                .get(index + 1)
+                .is_some_and(|next| next.start == cursor);
+            if !is_soft_wrap {
+                return index;
+            }
+        }
+    }
+    lines.len().saturating_sub(1)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ComposerAction, ComposerState, ComposerWidget, visible_window};
+    use super::{ComposerAction, ComposerState, ComposerWidget, visual_lines};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn modified_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
     }
 
     #[test]
@@ -285,9 +499,72 @@ mod tests {
     #[test]
     fn paste_normalizes_lines_and_drops_control_characters() {
         let mut composer = ComposerState::default();
-        composer.insert_paste("one\r\ntwo\u{2028}three\u{2029}four\u{0007}");
+        composer.insert_paste("one\r\n\t two\u{2028}three\u{2029}four\u{0007}");
 
-        assert_eq!(composer.text, "one two three four");
+        assert_eq!(composer.text, "one\n     two\nthree\nfour");
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_without_submitting() {
+        let mut composer = ComposerState::default();
+        composer.handle_key(key(KeyCode::Char('a')));
+
+        assert_eq!(
+            composer.handle_key(modified_key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            ComposerAction::None
+        );
+        composer.handle_key(key(KeyCode::Char('b')));
+
+        assert_eq!(composer.text, "a\nb");
+        assert_eq!(composer.cursor, "a\nb".len());
+    }
+
+    #[test]
+    fn vertical_navigation_preserves_the_text_column() {
+        let mut composer = ComposerState::default();
+        composer.insert_paste("first\nsecond");
+        composer.handle_key(key(KeyCode::Home));
+        composer.handle_key(key(KeyCode::Up));
+
+        assert_eq!(composer.cursor, 0);
+
+        composer.handle_key(key(KeyCode::Down));
+        composer.handle_key(key(KeyCode::End));
+        assert_eq!(composer.cursor, composer.text.len());
+    }
+
+    #[test]
+    fn full_width_text_before_a_newline_does_not_add_a_caret_row() {
+        let mut composer = ComposerState::default();
+        composer.insert_paste("abc\ndef");
+        composer.cursor = "abc".len();
+
+        assert_eq!(composer.desired_height(3, 20), 4);
+    }
+
+    #[test]
+    fn vertical_navigation_follows_soft_wrapped_lines() {
+        let mut composer = ComposerState::default();
+        composer.insert_paste("abcdef");
+
+        composer.handle_key_with_width(modified_key(KeyCode::Home, KeyModifiers::CONTROL), 3);
+        composer.handle_key_with_width(key(KeyCode::Down), 3);
+        assert_eq!(composer.cursor, 3);
+
+        composer.handle_key_with_width(key(KeyCode::Up), 3);
+        assert_eq!(composer.cursor, 0);
+
+        composer.handle_key_with_width(key(KeyCode::End), 3);
+        assert_eq!(composer.cursor, 3);
+    }
+
+    #[test]
+    fn desired_height_respects_tiny_maximums() {
+        let composer = ComposerState::default();
+
+        assert_eq!(composer.desired_height(8, 0), 0);
+        assert_eq!(composer.desired_height(8, 1), 1);
+        assert_eq!(composer.desired_height(8, 2), 2);
     }
 
     #[test]
@@ -313,13 +590,13 @@ mod tests {
     }
 
     #[test]
-    fn viewport_keeps_combining_graphemes_together() {
+    fn wrapping_keeps_combining_graphemes_together() {
         let text = "e\u{301}x";
-        let (start, end) = visible_window(text, text.len(), 2);
+        let lines = visual_lines(text, 1);
 
-        assert_eq!(&text[start..end], "x");
-        assert!(text.is_char_boundary(start));
-        assert!(text.is_char_boundary(end));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&text[lines[0].start..lines[0].end], "e\u{301}");
+        assert_eq!(&text[lines[1].start..lines[1].end], "x");
     }
 
     #[test]
@@ -340,7 +617,66 @@ mod tests {
         assert_eq!(buffer.cell((11, 1)).unwrap().symbol(), "│");
         assert_eq!(
             ComposerWidget::cursor_position(Rect::new(0, 0, 12, 3), &composer),
-            Some((10, 1))
+            Some((6, 1))
+        );
+    }
+
+    #[test]
+    fn creates_a_caret_row_when_text_fills_the_line() {
+        let mut composer = ComposerState::default();
+        composer.insert_paste("12345678");
+        assert_eq!(composer.desired_height(8, 20), 4);
+
+        let mut terminal = Terminal::new(TestBackend::new(12, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(ComposerWidget::new(&composer), frame.area());
+            })
+            .unwrap();
+
+        assert_eq!(
+            ComposerWidget::cursor_position(Rect::new(0, 0, 12, 4), &composer),
+            Some((3, 2))
+        );
+    }
+
+    #[test]
+    fn renders_a_placeholder_for_a_wide_glyph_on_a_one_cell_line() {
+        let mut composer = ComposerState::default();
+        composer.insert_paste("界");
+        let mut terminal = Terminal::new(TestBackend::new(5, 4)).unwrap();
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(ComposerWidget::new(&composer), frame.area());
+            })
+            .unwrap();
+
+        assert_eq!(
+            terminal.backend().buffer().cell((3, 1)).unwrap().symbol(),
+            "…"
+        );
+    }
+
+    #[test]
+    fn multiline_composer_grows_and_positions_the_cursor_on_the_active_line() {
+        let mut composer = ComposerState::default();
+        composer.insert_paste("one\ntwo");
+        assert_eq!(composer.desired_height(8, 20), 4);
+
+        let mut terminal = Terminal::new(TestBackend::new(12, 4)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(ComposerWidget::new(&composer), frame.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((3, 1)).unwrap().symbol(), "o");
+        assert_eq!(buffer.cell((3, 2)).unwrap().symbol(), "t");
+        assert_eq!(
+            ComposerWidget::cursor_position(Rect::new(0, 0, 12, 4), &composer),
+            Some((6, 2))
         );
     }
 

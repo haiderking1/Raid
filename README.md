@@ -12,4 +12,5 @@ Terminal coding agent (Rust + Ratatui).
 cargo run
 ```
 
-Type into the composer, press `Enter` to submit, or press `Esc` to quit.
+Type into the composer, press `Shift+Enter` for a newline, `Enter` to submit,
+or press `Esc` to quit.

@@ -9,7 +9,10 @@ use std::{io::stdout, time::Duration};
 use anyhow::Result;
 use crossterm::{
     cursor::{SetCursorStyle, Show},
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
 };
 use ratatui::DefaultTerminal;
@@ -24,7 +27,12 @@ fn main() -> Result<()> {
         .init();
 
     let mut terminal = ratatui::init();
-    let result = match execute!(stdout(), EnableBracketedPaste, SetCursorStyle::SteadyBlock) {
+    let result = match execute!(
+        stdout(),
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        SetCursorStyle::SteadyBlock
+    ) {
         Ok(()) => run(&mut terminal),
         Err(error) => Err(error.into()),
     };
@@ -32,6 +40,7 @@ fn main() -> Result<()> {
     let cleanup = execute!(
         stdout(),
         DisableBracketedPaste,
+        PopKeyboardEnhancementFlags,
         SetCursorStyle::DefaultUserShape,
         Show
     );
@@ -41,13 +50,16 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut composer = ComposerState::default();
+    let mut content_width = 0;
 
     loop {
-        terminal.draw(|frame| draw(frame, &composer))?;
+        terminal.draw(|frame| {
+            content_width = draw(frame, &composer);
+        })?;
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    match composer.handle_key(key) {
+                    match composer.handle_key_with_width(key, content_width) {
                         ComposerAction::Quit => break,
                         ComposerAction::Submit(message) => {
                             tracing::info!(message = %message, "message submitted");
@@ -63,23 +75,26 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
-fn draw(frame: &mut ratatui::Frame, composer: &ComposerState) {
+fn draw(frame: &mut ratatui::Frame, composer: &ComposerState) -> usize {
     let padded = frame.area().inner(Margin {
         vertical: 1,
         horizontal: 3,
     });
-    if padded.width == 0 || padded.height < 3 {
-        return;
+    if padded.width < 5 || padded.height < 3 {
+        return 0;
     }
 
+    let content_width = padded.width.saturating_sub(4) as usize;
+    let composer_height = composer.desired_height(content_width, padded.height);
     let composer_area = Rect {
         x: padded.x,
-        y: padded.y + padded.height - 3,
+        y: padded.y + padded.height - composer_height,
         width: padded.width,
-        height: 3,
+        height: composer_height,
     };
     frame.render_widget(ComposerWidget::new(composer), composer_area);
     if let Some(cursor) = ComposerWidget::cursor_position(composer_area, composer) {
         frame.set_cursor_position(cursor);
     }
+    content_width
 }
