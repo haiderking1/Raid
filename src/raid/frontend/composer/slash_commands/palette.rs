@@ -199,7 +199,7 @@ mod tests {
         let visible = (0..5)
             .map(|row| buffer_row(buffer, row))
             .collect::<String>();
-        assert!(visible.contains("compact"));
+        assert!(visible.contains("connect"));
         assert!(!visible.contains("settings"));
         assert_eq!(
             buffer_row(buffer, 5).trim(),

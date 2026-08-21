@@ -10,6 +10,13 @@ mod transport;
 mod types;
 mod validate;
 mod wire;
+mod stream_adapter;
+mod stream_fn;
+
+pub use stream_fn::{
+    convert_agent_messages, llm_context_to_model_request, opencode_stream_fn, protocol_from_api,
+    OpenCodeStreamConfig,
+};
 
 pub use cache::{memory_cache, MetadataCache};
 pub use catalog::{effective_input_limit, load_catalog, CatalogHttp, ReqwestCatalogHttp};

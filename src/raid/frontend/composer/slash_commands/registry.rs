@@ -37,6 +37,11 @@ pub static COMMANDS: &[SlashCommand] = &[
         argument: None,
     },
     SlashCommand {
+        name: "connect",
+        description: "Connect a provider (interactive API key setup)",
+        argument: None,
+    },
+    SlashCommand {
         name: "compact",
         description: "Compact conversation context",
         argument: None,

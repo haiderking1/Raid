@@ -48,6 +48,22 @@ impl ViewportState {
         }
     }
 
+    pub fn update_assistant(&mut self, index: usize, body: String) {
+        if let Some(TimelineItem::Message {
+            role: Role::Assistant,
+            body: existing,
+        }) = self.items.get_mut(index)
+        {
+            *existing = body;
+            self.scroll_from_bottom = 0;
+        }
+    }
+
+    pub fn append_assistant(&mut self, body: String) -> usize {
+        self.push(Role::Assistant, body);
+        self.items.len() - 1
+    }
+
     #[cfg_attr(not(test), expect(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()

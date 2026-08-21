@@ -1,6 +1,7 @@
+use super::metrics::composer_input_layout;
 use super::state::ComposerState;
 use super::wrap::ComposerLayout;
-use crate::frontend::clip::render_clipped;
+use crate::frontend::clip::render_clipped_with_cursor;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -17,31 +18,6 @@ impl<'a> ComposerWidget<'a> {
         Self { state }
     }
 
-    pub fn cursor_position(area: Rect, state: &ComposerState) -> Option<(u16, u16)> {
-        let inner = Self::block().inner(area);
-        let content_width = inner.width.saturating_sub(3) as usize;
-        if content_width == 0 || inner.height == 0 {
-            return None;
-        }
-
-        let text_x = inner.x.saturating_add(2);
-        let layout = ComposerLayout::new(
-            state.text(),
-            state.cursor().min(state.text().len()),
-            content_width,
-            inner.height as usize,
-        );
-        let cursor_row = layout.cursor_line.saturating_sub(layout.scroll_top);
-        let cursor_x = text_x.saturating_add(
-            layout
-                .cursor_width
-                .min(content_width.saturating_sub(1))
-                .try_into()
-                .unwrap_or(u16::MAX),
-        );
-        Some((cursor_x, inner.y + cursor_row as u16))
-    }
-
     fn block() -> Block<'static> {
         Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
@@ -56,34 +32,42 @@ impl Widget for ComposerWidget<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let content_width = inner.width.saturating_sub(3) as usize;
-        if content_width == 0 || inner.height == 0 {
+        let layout = composer_input_layout(inner);
+        if layout.wrap_width == 0 || inner.height == 0 {
             return;
         }
 
-        let text_x = inner.x.saturating_add(2);
         let prompt_style = Style::default().fg(Color::Rgb(190, 190, 190));
         let text_style = Style::default().fg(Color::White);
-        let layout = ComposerLayout::new(
+        let text_layout = ComposerLayout::new(
             self.state.text(),
             self.state.cursor().min(self.state.text().len()),
-            content_width,
+            layout.wrap_width,
             inner.height as usize,
         );
 
-        for (row, line) in layout
+        for (row, line) in text_layout
             .lines
             .iter()
-            .skip(layout.scroll_top)
+            .skip(text_layout.scroll_top)
             .take(inner.height as usize)
             .enumerate()
         {
-            render_clipped(
+            let line_index = text_layout.scroll_top + row;
+            let slice = &self.state.text()[line.start..line.end];
+            let cursor_offset = (line_index == text_layout.cursor_line).then(|| {
+                self.state
+                    .cursor()
+                    .min(line.end)
+                    .saturating_sub(line.start)
+            });
+            render_clipped_with_cursor(
                 buf,
-                text_x,
+                layout.text_x,
                 inner.y + row as u16,
-                &self.state.text()[line.start..line.end],
-                content_width,
+                slice,
+                cursor_offset,
+                layout.render_width,
                 text_style,
             );
         }
@@ -95,7 +79,7 @@ impl Widget for ComposerWidget<'_> {
 mod tests {
     use super::ComposerWidget;
     use crate::frontend::composer::ComposerState;
-    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use ratatui::{style::Modifier, Terminal, backend::TestBackend, layout::Rect};
 
     #[test]
     fn renders_the_prompt_and_keeps_text_inside_the_border() {
@@ -115,37 +99,32 @@ mod tests {
         assert_eq!(buffer.cell((0, 1)).unwrap().symbol(), ">");
         assert_eq!(buffer.cell((2, 1)).unwrap().symbol(), "j");
         assert_eq!(buffer.cell((3, 1)).unwrap().symbol(), "k");
-        assert_eq!(buffer.cell((11, 1)).unwrap().symbol(), " ");
-        assert_eq!(
-            ComposerWidget::cursor_position(Rect::new(0, 0, 12, 3), &composer),
-            Some((4, 1))
-        );
+        assert!(buffer.cell((4, 1)).unwrap().modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
-    fn creates_a_caret_row_when_text_fills_the_line() {
+    fn keeps_inverse_cursor_on_a_full_line_until_the_next_character() {
         let mut composer = ComposerState::default();
         composer.insert_paste("123456789");
-        assert_eq!(composer.desired_height(9, 20), 4);
+        assert_eq!(composer.desired_height(9, 20), 3);
 
-        let mut terminal = Terminal::new(TestBackend::new(12, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(12, 3)).unwrap();
         terminal
             .draw(|frame| {
                 frame.render_widget(ComposerWidget::new(&composer), frame.area());
             })
             .unwrap();
 
-        assert_eq!(
-            ComposerWidget::cursor_position(Rect::new(0, 0, 12, 4), &composer),
-            Some((2, 2))
-        );
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((10, 1)).unwrap().symbol(), "9");
+        assert!(buffer.cell((11, 1)).unwrap().modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
-    fn renders_a_placeholder_for_a_wide_glyph_on_a_one_cell_line() {
+    fn renders_a_wide_glyph_with_room_for_the_inverse_cursor() {
         let mut composer = ComposerState::default();
         composer.insert_paste("界");
-        let mut terminal = Terminal::new(TestBackend::new(4, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(8, 3)).unwrap();
 
         terminal
             .draw(|frame| {
@@ -153,10 +132,9 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            terminal.backend().buffer().cell((2, 1)).unwrap().symbol(),
-            "…"
-        );
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((2, 1)).unwrap().symbol(), "界");
+        assert!(buffer.cell((4, 1)).unwrap().modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
@@ -175,9 +153,6 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((2, 1)).unwrap().symbol(), "o");
         assert_eq!(buffer.cell((2, 2)).unwrap().symbol(), "t");
-        assert_eq!(
-            ComposerWidget::cursor_position(Rect::new(0, 0, 12, 4), &composer),
-            Some((5, 2))
-        );
+        assert!(buffer.cell((5, 2)).unwrap().modifier.contains(Modifier::REVERSED));
     }
 }

@@ -110,29 +110,7 @@ pub fn visual_lines(text: &str, width: usize) -> Vec<VisualLine> {
 }
 
 pub fn visual_lines_for_cursor(text: &str, cursor: usize, width: usize) -> Vec<VisualLine> {
-    let mut lines = visual_lines(text, width);
-    let width = width.max(1);
-    let cursor = cursor.min(text.len());
-    let current_line = cursor_line(&lines, cursor);
-    let line = lines[current_line];
-    let is_soft_wrap = lines
-        .get(current_line + 1)
-        .is_some_and(|next| next.start == cursor);
-    if cursor == line.end
-        && line.width >= width
-        && !is_soft_wrap
-        && !text[cursor..].starts_with('\n')
-    {
-        lines.insert(
-            current_line + 1,
-            VisualLine {
-                start: cursor,
-                end: cursor,
-                width: 0,
-            },
-        );
-    }
-    lines
+    visual_lines(text, width.max(1))
 }
 
 pub struct ComposerLayout {
@@ -179,7 +157,7 @@ fn cursor_line(lines: &[VisualLine], cursor: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::visual_lines;
+    use super::{visual_lines, visual_lines_for_cursor};
 
     #[test]
     fn wrapping_keeps_combining_graphemes_together() {
@@ -189,5 +167,20 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(&text[lines[0].start..lines[0].end], "e\u{301}");
         assert_eq!(&text[lines[1].start..lines[1].end], "x");
+    }
+
+    #[test]
+    fn full_line_keeps_cursor_on_same_row_until_next_character() {
+        let text = "123456789";
+        assert_eq!(visual_lines_for_cursor(text, text.len(), 9).len(), 1);
+    }
+
+    #[test]
+    fn next_character_on_a_full_line_soft_wraps() {
+        let text = "1234567890";
+        let lines = visual_lines(text, 9);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&text[lines[0].start..lines[0].end], "123456789");
+        assert_eq!(&text[lines[1].start..lines[1].end], "0");
     }
 }

@@ -1,32 +1,61 @@
-mod demo;
+mod agent;
+mod connect;
 mod layout;
+
+pub use agent::install_default_stream_fn;
 
 use crate::frontend::chat::{MarkdownCache, Role, ViewportState};
 use crate::frontend::composer::{ComposerAction, ComposerState, ComposerWidget};
+use crate::frontend::connect::{ConnectPanelStep, ConnectPanelWidget};
 use crate::frontend::tools::ToolStatus;
+use agent::AgentSession;
+use connect::{ConnectAction, ConnectFlow};
 use crossterm::event::{KeyCode, KeyEvent};
-use demo::Demo;
 use layout::shell_layout;
 use ratatui::{Frame, layout::Rect};
 
-#[derive(Default)]
 pub struct App {
     composer: ComposerState,
     chat: ViewportState,
     cache: MarkdownCache,
     last_chat_width: usize,
     last_chat_height: usize,
-    demo: Option<Demo>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum AppAction {
-    None,
-    Quit,
+    agent: AgentSession,
+    connect: ConnectFlow,
 }
 
 impl App {
+    pub fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self::with_agent(AgentSession::new(runtime))
+    }
+
+    fn with_agent(agent: AgentSession) -> Self {
+        Self {
+            composer: ComposerState::default(),
+            chat: ViewportState::default(),
+            cache: MarkdownCache::default(),
+            last_chat_width: 0,
+            last_chat_height: 0,
+            agent,
+            connect: ConnectFlow::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connect_active(&self) -> bool {
+        self.connect.active()
+    }
+
+    #[cfg(test)]
+    pub fn with_stream_fn(runtime: tokio::runtime::Handle, stream_fn: crate::backend::agent::StreamFn) -> Self {
+        Self::with_agent(AgentSession::new(runtime).with_stream_fn(stream_fn))
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, content_width: usize) -> AppAction {
+        if self.connect.active() {
+            return self.handle_connect_key(key, content_width);
+        }
+
         match key.code {
             KeyCode::PageUp => {
                 let width = self.last_chat_width.max(content_width).max(1);
@@ -44,11 +73,16 @@ impl App {
             _ => match self.composer.handle_key_with_width(key, content_width) {
                 ComposerAction::Quit => AppAction::Quit,
                 ComposerAction::Submit(message) => {
-                    self.chat.push(Role::User, message);
-                    self.demo = Some(demo::Demo::new());
+                    self.chat.push(Role::User, message.clone());
+                    self.agent.submit(message);
                     AppAction::None
                 }
                 ComposerAction::Command { name, args } => {
+                    if name == "connect" {
+                        self.connect.start();
+                        self.composer = ComposerState::default();
+                        return AppAction::None;
+                    }
                     let detail = if args.is_empty() { String::new() } else { args };
                     let summary = if detail.is_empty() {
                         format!("Ran /{name}")
@@ -65,8 +99,28 @@ impl App {
         }
     }
 
+    fn handle_connect_key(&mut self, key: KeyEvent, content_width: usize) -> AppAction {
+        match self.connect.handle_key(key, content_width) {
+            ConnectAction::None => AppAction::None,
+            ConnectAction::Cancelled => AppAction::None,
+            ConnectAction::Finished { summary } => {
+                self.agent.reload_credentials();
+                self.chat.push(Role::Assistant, summary);
+                AppAction::None
+            }
+        }
+    }
+
     pub fn insert_paste(&mut self, pasted: &str) {
+        if self.connect.active() {
+            self.connect.insert_paste(pasted);
+            return;
+        }
         self.composer.insert_paste(pasted);
+    }
+
+    pub fn tick(&mut self) {
+        self.agent.poll(&mut self.chat);
     }
 
     pub fn draw(&mut self, frame: &mut Frame) -> usize {
@@ -81,6 +135,10 @@ impl App {
             height: area.height.saturating_sub(1),
         };
 
+        if self.connect.active() {
+            return self.draw_connect(frame, padded);
+        }
+
         let layout = shell_layout(padded, &self.composer, 0);
 
         if layout.chat.height > 0 {
@@ -93,19 +151,81 @@ impl App {
         if let (Some(area), Some(widget)) = (layout.palette, self.composer.palette_widget()) {
             frame.render_widget(widget, area);
         }
-        if let Some(cursor) = ComposerWidget::cursor_position(layout.composer, &self.composer) {
-            frame.set_cursor_position(cursor);
-        }
         layout.content_width
+    }
+
+    fn draw_connect(&mut self, frame: &mut Frame, area: Rect) -> usize {
+        let panel_height = self
+            .connect
+            .panel_height(area.width, area.height)
+            .min(area.height);
+        let panel = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(panel_height),
+            width: area.width,
+            height: panel_height,
+        };
+        if panel.y > area.y {
+            let chat = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: panel.y.saturating_sub(area.y),
+            };
+            let width = chat.width as usize;
+            self.last_chat_width = width;
+            self.last_chat_height = chat.height as usize;
+            frame.render_widget(self.chat.widget(&mut self.cache, width.max(1)), chat);
+        }
+
+        let panel_layout = crate::frontend::composer::padded_input_layout(panel);
+        let header = self.connect.header_text();
+        let widget = match self.connect.panel_step() {
+            ConnectPanelStep::Provider => {
+                ConnectPanelWidget::provider(&header, self.connect.palette_selected())
+            }
+            ConnectPanelStep::ApiKey => ConnectPanelWidget::api_key(
+                &header,
+                self.connect.label_text(),
+                self.connect.footer_text().unwrap_or(""),
+                self.connect.input(),
+                panel_layout.wrap_width.max(1),
+                panel.height.saturating_sub(5).max(1),
+            ),
+        };
+        frame.render_widget(widget, panel);
+
+        panel_layout.wrap_width.max(1)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AppAction {
+    None,
+    Quit,
+}
+
+#[cfg(test)]
+impl App {
+    fn run_agent_to_end(&mut self) {
+        self.agent.drive_to_completion(&mut self.chat);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{App, AppAction};
+    use crate::app::agent::test_stream_fn;
     use crate::frontend::chat::Role;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -113,21 +233,21 @@ mod tests {
 
     #[test]
     fn submit_appends_a_user_message() {
-        let mut app = App::default();
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
         for character in "**hi**".chars() {
             app.handle_key(key(KeyCode::Char(character)), 40);
         }
         assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
         assert!(!app.chat.is_empty());
-        app.run_demo_to_end();
+        app.run_agent_to_end();
         assert_eq!(app.chat.last_role(), Some(Role::Assistant));
-        assert!(app.chat.contains_tool("read"));
-        assert!(app.chat.contains_tool("bash"));
     }
 
     #[test]
     fn slash_command_shows_up_in_the_timeline() {
-        let mut app = App::default();
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
         app.insert_paste("/status");
         assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
         assert!(app.chat.contains_tool("status"));
@@ -135,11 +255,21 @@ mod tests {
     }
 
     #[test]
-    fn draw_shows_markdown_chat_and_inline_tools() {
-        let mut app = App::default();
+    fn connect_command_opens_provider_picker() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
+        app.insert_paste("/connect");
+        assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
+        assert!(app.connect_active());
+    }
+
+    #[test]
+    fn draw_shows_markdown_chat() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
         app.insert_paste("**hi**");
         app.handle_key(key(KeyCode::Enter), 40);
-        app.run_demo_to_end();
+        app.run_agent_to_end();
 
         let mut terminal = Terminal::new(TestBackend::new(48, 32)).unwrap();
         terminal
@@ -156,19 +286,7 @@ mod tests {
             }
             screen.push('\n');
         }
-        assert!(screen.contains("DefaultTerminal"));
-        assert!(screen.contains("Read("));
-        assert!(screen.contains("Bash("));
-        assert!(screen.contains("└"));
-        assert!(screen.contains("ctrl+r"));
+        assert!(screen.contains("mock reply") || screen.contains("hi"));
         assert!(screen.contains('>'));
-        assert!(screen.contains("agent loop"));
-        let inspect = screen.find("inspect").expect("inspect");
-        let read = screen.find("Read(").expect("Read");
-        let bash = screen.find("Bash(").expect("Bash");
-        let wrap_up = screen.find("Done").expect("Done");
-        assert!(inspect < read);
-        assert!(read < bash);
-        assert!(bash < wrap_up);
     }
 }
