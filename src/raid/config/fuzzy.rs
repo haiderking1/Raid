@@ -4,8 +4,8 @@ pub struct FuzzyMatch {
     pub score: f64,
 }
 
-pub fn model_search_text(id: &str, provider: &str, name: &str) -> String {
-    format!("{provider} {provider}/{id} {provider} {id} {name}")
+pub fn model_search_fields(id: &str, provider: &str, name: &str) -> [String; 3] {
+    [id.to_string(), name.to_string(), provider.to_string()]
 }
 
 pub fn fuzzy_match(query: &str, text: &str) -> FuzzyMatch {
@@ -37,6 +37,14 @@ pub fn fuzzy_filter_indices<T>(
     query: &str,
     get_text: impl Fn(&T) -> String,
 ) -> Vec<usize> {
+    fuzzy_filter_indices_fields(items, query, |item| vec![get_text(item)])
+}
+
+pub fn fuzzy_filter_indices_fields<T>(
+    items: &[T],
+    query: &str,
+    get_fields: impl Fn(&T) -> Vec<String>,
+) -> Vec<usize> {
     let query = query.trim();
     if query.is_empty() {
         return (0..items.len()).collect();
@@ -53,17 +61,15 @@ pub fn fuzzy_filter_indices<T>(
 
     let mut matches = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        let text = get_text(item);
+        let fields = get_fields(item);
         let mut total_score = 0.0;
         let mut all_match = true;
         for token in &tokens {
-            let result = fuzzy_match(token, &text);
-            if result.matches {
-                total_score += result.score;
-            } else {
+            let Some(score) = best_field_score(token, &fields) else {
                 all_match = false;
                 break;
-            }
+            };
+            total_score += score;
         }
         if all_match {
             matches.push((index, total_score));
@@ -76,6 +82,15 @@ pub fn fuzzy_filter_indices<T>(
             .then_with(|| left.cmp(right))
     });
     matches.into_iter().map(|(index, _)| index).collect()
+}
+
+fn best_field_score(token: &str, fields: &[String]) -> Option<f64> {
+    fields
+        .iter()
+        .map(|field| fuzzy_match(token, field))
+        .filter(|result| result.matches)
+        .map(|result| result.score)
+        .min_by(|left, right| left.total_cmp(right))
 }
 
 fn match_query(query: &str, text: &str) -> FuzzyMatch {
@@ -216,7 +231,7 @@ fn split_numeric_alpha(query: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fuzzy_filter_indices, fuzzy_match, model_search_text};
+    use super::{fuzzy_filter_indices, fuzzy_filter_indices_fields, fuzzy_match, model_search_fields};
 
     #[test]
     fn empty_query_matches_everything() {
@@ -286,10 +301,49 @@ mod tests {
                 name: "Ox Alpha Free",
             },
         ];
-        let filtered = fuzzy_filter_indices(&models, "lu", |model| {
-            model_search_text(model.id, "opencode-go", model.name)
+        let filtered = fuzzy_filter_indices_fields(&models, "lu", |model| {
+            model_search_fields(model.id, "opencode-go", model.name).to_vec()
         });
         assert_eq!(filtered, vec![2, 0, 1]);
         assert!(!filtered.contains(&3));
+    }
+
+    #[test]
+    fn model_search_does_not_wrap_query_letters_through_provider() {
+        #[derive(Clone)]
+        struct Model {
+            id: &'static str,
+            name: &'static str,
+        }
+        let models = [
+            Model {
+                id: "ox-alpha-free",
+                name: "Ox Alpha Free",
+            },
+            Model {
+                id: "minimax-m3",
+                name: "MiniMax M3",
+            },
+            Model {
+                id: "qwen3.7-max",
+                name: "Qwen3.7 Max",
+            },
+            Model {
+                id: "qwen3.8-max",
+                name: "Qwen3.8 Max",
+            },
+            Model {
+                id: "minimax-m2.7",
+                name: "MiniMax M2.7",
+            },
+            Model {
+                id: "deepseek-v4-flash-vision-exp",
+                name: "DeepSeek V4 Flash Vision Exp",
+            },
+        ];
+        let filtered = fuzzy_filter_indices_fields(&models, "exp", |model| {
+            model_search_fields(model.id, "opencode-go", model.name).to_vec()
+        });
+        assert_eq!(filtered, vec![5]);
     }
 }

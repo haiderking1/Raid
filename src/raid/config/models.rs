@@ -68,8 +68,8 @@ pub async fn refresh_connected_catalog_async() -> Result<OpenCodeCatalog, String
 }
 
 pub fn filter_model_indices(models: &[ResolvedModel], query: &str) -> Vec<usize> {
-    fuzzy::fuzzy_filter_indices(models, query, |model| {
-        fuzzy::model_search_text(&model.id, &model.metadata_provider_id, &model.name)
+    fuzzy::fuzzy_filter_indices_fields(models, query, |model| {
+        fuzzy::model_search_fields(&model.id, &model.metadata_provider_id, &model.name).to_vec()
     })
 }
 
@@ -139,9 +139,19 @@ mod tests {
         assert_eq!(filter_model_indices(&models, "glm"), vec![1]);
         assert_eq!(filter_model_indices(&models, "g56"), vec![0]);
         assert_eq!(filter_model_indices(&models, "flash"), vec![2]);
-        assert_eq!(filter_model_indices(&models, "lun"), vec![0, 5, 6]);
+        assert_eq!(filter_model_indices(&models, "lun"), vec![0]);
         assert_eq!(filter_model_indices(&models, "lu"), vec![0, 5, 6]);
-        assert!(!filter_model_indices(&models, "lun").contains(&4));
+        assert_eq!(
+            filter_model_indices(
+                &[
+                    sample_model("ox-alpha-free", "Ox Alpha Free"),
+                    sample_model("minimax-m3", "MiniMax M3"),
+                    sample_model("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision Exp"),
+                ],
+                "exp",
+            ),
+            vec![2]
+        );
         assert!(filter_model_indices(&models, "zzzz").is_empty());
     }
 
