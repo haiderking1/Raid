@@ -1,5 +1,4 @@
 mod app;
-#[allow(dead_code)]
 mod backend;
 mod frontend;
 
