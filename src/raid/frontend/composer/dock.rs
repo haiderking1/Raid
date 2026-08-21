@@ -58,7 +58,7 @@ mod tests {
         assert_eq!(layout.composer.height, 3);
         let palette = layout.palette.expect("palette should be visible");
         assert_eq!(palette.y, layout.composer.y + layout.composer.height);
-        assert_eq!(palette.height, 6);
+        assert_eq!(palette.height, COMMANDS.len() as u16 + 1);
         assert_eq!(
             layout.composer.y + layout.composer.height + palette.height,
             14
@@ -98,7 +98,7 @@ mod tests {
 
         assert!(row(composer_line).contains('>'));
         assert!(row(composer_line).contains('/'));
-        assert!(row(palette_line).contains("settings"));
+        assert!(row(palette_line).contains("connect"));
         assert!(row(footer_line).contains(&format!("(1/{})", COMMANDS.len())));
     }
 }

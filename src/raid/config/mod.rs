@@ -11,7 +11,7 @@ pub use models::{
     refresh_connected_catalog, refresh_connected_catalog_async, save_default_model,
     MAX_VISIBLE_MODELS,
 };
-pub use paths::{catalog_cache_path, write_private_file};
+pub use paths::{catalog_cache_path, sessions_dir, write_private_file};
 pub use providers::{plan_for_provider_id, provider_by_id, ConnectProvider, PROVIDERS};
 pub use settings::RaidSettings;
 

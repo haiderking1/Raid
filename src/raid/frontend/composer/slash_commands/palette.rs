@@ -174,8 +174,8 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "→");
-        assert!(buffer_row(buffer, 0).contains("settings"));
-        assert!(buffer_row(buffer, 0).contains("Open settings menu"));
+        assert!(buffer_row(buffer, 0).contains("connect"));
+        assert!(buffer_row(buffer, 0).contains("Connect a provider"));
         assert!(buffer_row(buffer, 1).contains("model"));
         assert!(!buffer_row(buffer, 1).contains("→"));
         assert_eq!(
@@ -185,25 +185,22 @@ mod tests {
     }
 
     #[test]
-    fn palette_scrolls_so_the_selected_row_stays_visible() {
+    fn palette_marks_the_selected_command() {
         let matches = matching_commands("");
         let mut terminal = Terminal::new(TestBackend::new(48, 6)).unwrap();
 
         terminal
             .draw(|frame| {
-                frame.render_widget(SlashPaletteWidget::new(matches.clone(), 6), frame.area());
+                frame.render_widget(SlashPaletteWidget::new(matches.clone(), 1), frame.area());
             })
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        let visible = (0..5)
-            .map(|row| buffer_row(buffer, row))
-            .collect::<String>();
-        assert!(visible.contains("connect"));
-        assert!(!visible.contains("settings"));
+        assert!(buffer_row(buffer, 1).starts_with("→"));
+        assert!(buffer_row(buffer, 1).contains("model"));
         assert_eq!(
             buffer_row(buffer, 5).trim(),
-            format!("(7/{})", COMMANDS.len())
+            format!("(2/{})", COMMANDS.len())
         );
     }
 

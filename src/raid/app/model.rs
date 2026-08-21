@@ -76,11 +76,6 @@ impl ModelFlow {
         self.selected
     }
 
-    #[cfg(test)]
-    pub fn current_model_id(&self) -> &str {
-        &self.current_model_id
-    }
-
     pub fn start(&mut self, runtime: &Handle) {
         *self = Self::default();
         self.active = true;
@@ -216,7 +211,7 @@ impl ModelFlow {
         let Some(model) = self.models.get(model_index) else {
             return ModelAction::None;
         };
-        match save_default_model(&model.id) {
+        match save_default_model(&model.id, model.protocol.api_name()) {
             Ok(()) => {
                 self.active = false;
                 ModelAction::Selected

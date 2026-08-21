@@ -224,7 +224,7 @@ fn slash_opens_the_palette_and_enter_runs_the_selected_command() {
     assert_eq!(
         composer.handle_key(key(KeyCode::Enter)),
         ComposerAction::Command {
-            name: "settings".to_owned(),
+            name: "connect".to_owned(),
             args: String::new(),
         }
     );
@@ -245,12 +245,12 @@ fn slash_query_filters_and_down_selects_the_next_command() {
     );
 
     let mut composer = ComposerState::default();
-    composer.insert_paste("/s");
+    composer.insert_paste("/");
     composer.handle_key(key(KeyCode::Down));
     assert_eq!(
         composer.handle_key(key(KeyCode::Enter)),
         ComposerAction::Command {
-            name: "scoped-models".to_owned(),
+            name: "model".to_owned(),
             args: String::new(),
         }
     );
@@ -274,48 +274,25 @@ fn palette_wraps_from_the_last_command_to_the_first() {
 #[test]
 fn tab_completes_the_selected_command_name() {
     let mut composer = ComposerState::default();
-    composer.insert_paste("/set");
+    composer.insert_paste("/con");
     composer.handle_key(key(KeyCode::Tab));
 
-    assert_eq!(composer.text, "/settings");
+    assert_eq!(composer.text, "/connect");
     assert!(composer.palette_visible());
-    assert_eq!(composer.cursor, "/settings".len());
-}
-
-#[test]
-fn tab_adds_a_space_when_the_command_takes_an_argument() {
-    let mut composer = ComposerState::default();
-    composer.insert_paste("/exp");
-    composer.handle_key(key(KeyCode::Tab));
-
-    assert_eq!(composer.text, "/export ");
-}
-
-#[test]
-fn enter_passes_typed_arguments_to_the_command() {
-    let mut composer = ComposerState::default();
-    composer.insert_paste("/export ./out.html");
-
-    assert_eq!(
-        composer.handle_key(key(KeyCode::Enter)),
-        ComposerAction::Command {
-            name: "export".to_owned(),
-            args: "./out.html".to_owned(),
-        }
-    );
+    assert_eq!(composer.cursor, "/connect".len());
 }
 
 #[test]
 fn escape_dismisses_the_palette_without_quitting() {
     let mut composer = ComposerState::default();
-    composer.insert_paste("/settings");
+    composer.insert_paste("/connect");
 
     assert_eq!(composer.handle_key(key(KeyCode::Esc)), ComposerAction::None);
     assert!(!composer.palette_visible());
-    assert_eq!(composer.text, "/settings");
+    assert_eq!(composer.text, "/connect");
     assert_eq!(
         composer.handle_key(key(KeyCode::Enter)),
-        ComposerAction::Submit("/settings".to_owned())
+        ComposerAction::Submit("/connect".to_owned())
     );
 }
 

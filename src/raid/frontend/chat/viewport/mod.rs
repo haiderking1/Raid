@@ -31,6 +31,11 @@ pub struct ViewportState {
 }
 
 impl ViewportState {
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.scroll_from_bottom = 0;
+    }
+
     pub fn push(&mut self, role: Role, body: String) {
         self.items.push(TimelineItem::message(role, body));
         self.scroll_from_bottom = 0;
@@ -82,14 +87,6 @@ impl ViewportState {
         self.items.iter().rev().find_map(|item| match item {
             TimelineItem::Message { role, .. } => Some(*role),
             TimelineItem::Tool(_) => None,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn contains_tool(&self, name: &str) -> bool {
-        self.items.iter().any(|item| match item {
-            TimelineItem::Tool(call) => call.name == name,
-            TimelineItem::Message { .. } => false,
         })
     }
 

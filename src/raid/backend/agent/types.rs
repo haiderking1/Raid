@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -184,12 +184,36 @@ pub struct ToolResultMessage {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum AgentMessage {
     User(UserMessage),
     Assistant(AssistantMessage),
     ToolResult(ToolResultMessage),
+}
+
+impl<'de> Deserialize<'de> for AgentMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let value = Value::deserialize(deserializer)?;
+        match value.get("role").and_then(Value::as_str) {
+            Some("user") => serde_json::from_value(value)
+                .map(Self::User)
+                .map_err(D::Error::custom),
+            Some("assistant") => serde_json::from_value(value)
+                .map(Self::Assistant)
+                .map_err(D::Error::custom),
+            Some("toolResult") => serde_json::from_value(value)
+                .map(Self::ToolResult)
+                .map_err(D::Error::custom),
+            Some(role) => Err(D::Error::custom(format!("unknown agent message role {role}"))),
+            None => Err(D::Error::custom("agent message is missing its role")),
+        }
+    }
 }
 
 impl AgentMessage {
@@ -199,6 +223,22 @@ impl AgentMessage {
             Self::Assistant(message) => &message.role,
             Self::ToolResult(message) => &message.role,
         }
+    }
+}
+
+#[cfg(test)]
+mod message_serde_tests {
+    use super::{assistant_message, AgentMessage, AssistantContent, StopReason, TextContent};
+
+    #[test]
+    fn assistant_messages_do_not_deserialize_as_users() {
+        let message = AgentMessage::Assistant(assistant_message(
+            vec![AssistantContent::Text(TextContent::new("restored"))],
+            StopReason::Stop,
+        ));
+        let json = serde_json::to_string(&message).expect("serialize assistant");
+        let restored: AgentMessage = serde_json::from_str(&json).expect("restore assistant");
+        assert!(matches!(restored, AgentMessage::Assistant(_)));
     }
 }
 
@@ -396,6 +436,7 @@ pub struct AgentLoopTurnUpdate {
 #[derive(Debug, Clone)]
 pub struct StreamOptions {
     pub api_key: Option<String>,
+    pub max_output_tokens: Option<u64>,
 }
 
 pub type ConvertToLlmFn =

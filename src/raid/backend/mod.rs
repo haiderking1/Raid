@@ -2,4 +2,5 @@
 
 pub mod agent;
 pub mod opencode;
+pub mod session;
 pub mod tools;

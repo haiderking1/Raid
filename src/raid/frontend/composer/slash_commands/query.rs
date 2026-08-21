@@ -72,20 +72,20 @@ mod tests {
     fn matching_commands_are_case_insensitive_prefixes_in_registry_order() {
         let matches = matching_commands("");
         assert_eq!(matches.len(), COMMANDS.len());
-        assert_eq!(matches[0].name, "settings");
+        assert_eq!(matches[0].name, "connect");
 
-        let matches = matching_commands("s");
+        let matches = matching_commands("m");
         assert_eq!(
             matches
                 .iter()
                 .map(|command| command.name)
                 .collect::<Vec<_>>(),
-            ["settings", "scoped-models", "status"]
+            ["model"]
         );
 
-        let matches = matching_commands("SET");
+        let matches = matching_commands("CON");
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].name, "settings");
+        assert_eq!(matches[0].name, "connect");
 
         assert!(matching_commands("zzzz").is_empty());
     }

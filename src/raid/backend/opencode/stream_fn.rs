@@ -84,15 +84,20 @@ async fn run_live_stream(
         .ok_or_else(|| TransportError::new("invalid-api-key", "An API key is required.", false))?;
 
     let protocol = protocol_from_api(&model.api);
+    let output_limit = options
+        .max_output_tokens
+        .unwrap_or(config.output_limit)
+        .min(config.output_limit)
+        .max(1);
     let identity = LanguageModelIdentity {
         id: model.id.clone(),
         protocol,
-        output_limit: config.output_limit,
+        output_limit,
     };
     validate_language_model(&api_key, &identity)?;
 
     let request = llm_context_to_model_request(&llm_context, ProviderOptions::default())?;
-    let body = build_stream_request_body(protocol, &model.id, &request, config.output_limit)?;
+    let body = build_stream_request_body(protocol, &model.id, &request, output_limit)?;
     let plan = crate::config::plan_for_provider_id(&model.provider);
     let url = stream_url(plan, protocol);
     let headers = stream_headers(&api_key, protocol);

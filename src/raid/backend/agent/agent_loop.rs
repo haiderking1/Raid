@@ -351,7 +351,10 @@ async fn stream_assistant_response(
     let stream = stream_fn(
         config.model.clone(),
         llm_context,
-        super::types::StreamOptions { api_key },
+        super::types::StreamOptions {
+            api_key,
+            max_output_tokens: None,
+        },
         cancel.clone(),
     )
     .await;

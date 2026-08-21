@@ -7,53 +7,13 @@ pub struct SlashCommand {
 
 pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
-        name: "settings",
-        description: "Open settings menu",
+        name: "connect",
+        description: "Connect a provider",
         argument: None,
     },
     SlashCommand {
         name: "model",
-        description: "Select a model (interactive fuzzy search)",
-        argument: None,
-    },
-    SlashCommand {
-        name: "scoped-models",
-        description: "Enable/disable models for Ctrl+P cycling",
-        argument: None,
-    },
-    SlashCommand {
-        name: "export",
-        description: "Export session (HTML default, or specify path: .html/.jsonl)",
-        argument: Some("<path>"),
-    },
-    SlashCommand {
-        name: "import",
-        description: "Import and resume a session from a JSONL file",
-        argument: Some("<path>"),
-    },
-    SlashCommand {
-        name: "clear",
-        description: "Clear the current session",
-        argument: None,
-    },
-    SlashCommand {
-        name: "connect",
-        description: "Connect a provider (interactive API key setup)",
-        argument: None,
-    },
-    SlashCommand {
-        name: "compact",
-        description: "Compact conversation context",
-        argument: None,
-    },
-    SlashCommand {
-        name: "copy",
-        description: "Copy the last response",
-        argument: None,
-    },
-    SlashCommand {
-        name: "help",
-        description: "List slash commands",
+        description: "Select a model",
         argument: None,
     },
     SlashCommand {
@@ -63,12 +23,7 @@ pub static COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "resume",
-        description: "Resume a previous session",
-        argument: Some("<session>"),
-    },
-    SlashCommand {
-        name: "status",
-        description: "Show session and model status",
+        description: "Resume a different session",
         argument: None,
     },
 ];

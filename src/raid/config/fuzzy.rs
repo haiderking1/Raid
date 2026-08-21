@@ -32,14 +32,6 @@ pub fn fuzzy_match(query: &str, text: &str) -> FuzzyMatch {
     primary
 }
 
-pub fn fuzzy_filter_indices<T>(
-    items: &[T],
-    query: &str,
-    get_text: impl Fn(&T) -> String,
-) -> Vec<usize> {
-    fuzzy_filter_indices_fields(items, query, |item| vec![get_text(item)])
-}
-
 pub fn fuzzy_filter_indices_fields<T>(
     items: &[T],
     query: &str,
@@ -231,7 +223,7 @@ fn split_numeric_alpha(query: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fuzzy_filter_indices, fuzzy_filter_indices_fields, fuzzy_match, model_search_fields};
+    use super::{fuzzy_filter_indices_fields, fuzzy_match, model_search_fields};
 
     #[test]
     fn empty_query_matches_everything() {
@@ -267,13 +259,6 @@ mod tests {
     #[test]
     fn matches_swapped_alpha_numeric_tokens() {
         assert!(fuzzy_match("codex52", "gpt-5.2-codex").matches);
-    }
-
-    #[test]
-    fn fuzzy_filter_sorts_by_match_quality() {
-        let items = ["a_p_p", "app", "application"];
-        let filtered = fuzzy_filter_indices(&items, "app", |item| item.to_string());
-        assert_eq!(filtered.first().copied(), Some(1));
     }
 
     #[test]

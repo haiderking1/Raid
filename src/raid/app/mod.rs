@@ -2,6 +2,7 @@ mod agent;
 mod connect;
 mod layout;
 mod model;
+mod session;
 
 pub use agent::install_default_stream_fn;
 
@@ -9,13 +10,14 @@ use crate::frontend::chat::{MarkdownCache, Role, ViewportState};
 use crate::frontend::composer::{ComposerAction, ComposerState, ComposerWidget};
 use crate::frontend::connect::{ConnectPanelStep, ConnectPanelWidget};
 use crate::frontend::model::{model_input_wrap_width, model_palette_height, ModelPaletteWidget};
-use crate::frontend::tools::ToolStatus;
+use crate::frontend::session::{session_input_wrap_width, session_palette_height, SessionPaletteWidget};
 use agent::AgentSession;
 use connect::{ConnectAction, ConnectFlow};
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use layout::shell_layout;
 use model::{ModelAction, ModelFlow};
 use ratatui::{Frame, layout::Rect};
+use session::{SessionAction, SessionFlow};
 
 pub struct App {
     composer: ComposerState,
@@ -26,14 +28,44 @@ pub struct App {
     agent: AgentSession,
     connect: ConnectFlow,
     model: ModelFlow,
+    session: SessionFlow,
     runtime: tokio::runtime::Handle,
 }
 
 const MOUSE_SCROLL_LINES: usize = 3;
 
+#[derive(Debug, Default)]
+pub struct LaunchOptions {
+    pub continue_session: bool,
+    pub resume: bool,
+    pub no_session: bool,
+    pub session: Option<std::path::PathBuf>,
+}
+
 impl App {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
         Self::with_agent(AgentSession::new(runtime.clone()), runtime)
+    }
+
+    pub fn new_with_launch(runtime: tokio::runtime::Handle, launch: LaunchOptions) -> Self {
+        let mut app = Self::new(runtime);
+        if launch.no_session {
+            app.agent.disable_persistence();
+        }
+        if let Some(path) = launch.session {
+            if let Err(error) = app.agent.open_session(path, &mut app.chat) {
+                app.chat.push(Role::Assistant, error);
+            }
+        } else if launch.continue_session {
+            match app.agent.open_most_recent(&mut app.chat) {
+                Ok(true) | Ok(false) => {}
+                Err(error) => app.chat.push(Role::Assistant, error),
+            }
+        }
+        if launch.resume {
+            app.start_session_picker();
+        }
+        app
     }
 
     fn with_agent(agent: AgentSession, runtime: tokio::runtime::Handle) -> Self {
@@ -46,6 +78,7 @@ impl App {
             agent,
             connect: ConnectFlow::default(),
             model: ModelFlow::default(),
+            session: SessionFlow::default(),
             runtime,
         }
     }
@@ -61,6 +94,11 @@ impl App {
     }
 
     #[cfg(test)]
+    pub(crate) fn session_active(&self) -> bool {
+        self.session.active()
+    }
+
+    #[cfg(test)]
     pub fn with_stream_fn(runtime: tokio::runtime::Handle, stream_fn: crate::backend::agent::StreamFn) -> Self {
         Self::with_agent(AgentSession::new(runtime.clone()).with_stream_fn(stream_fn), runtime)
     }
@@ -71,6 +109,23 @@ impl App {
         }
         if self.model.active() {
             return self.handle_model_key(key, content_width);
+        }
+        if self.session.active() {
+            return self.handle_session_key(key, content_width);
+        }
+
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.start_session_picker();
+            return AppAction::None;
+        }
+        if key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Err(error) = self.agent.new_session(&mut self.chat) {
+                self.chat.push(Role::Assistant, error);
+            } else {
+                self.composer = ComposerState::default();
+                self.cache = MarkdownCache::default();
+            }
+            return AppAction::None;
         }
 
         match key.code {
@@ -94,27 +149,28 @@ impl App {
                     self.agent.submit(message);
                     AppAction::None
                 }
-                ComposerAction::Command { name, args } => {
-                    if name == "connect" {
-                        self.connect.start();
-                        self.composer = ComposerState::default();
-                        return AppAction::None;
+                ComposerAction::Command { name, .. } => {
+                    match name.as_str() {
+                        "connect" => {
+                            self.connect.start();
+                            self.composer = ComposerState::default();
+                        }
+                        "model" => {
+                            self.model.start(&self.runtime);
+                            self.composer = ComposerState::default();
+                            self.model.apply_filter(self.composer.text());
+                        }
+                        "new" => {
+                            if let Err(error) = self.agent.new_session(&mut self.chat) {
+                                self.chat.push(Role::Assistant, error);
+                            } else {
+                                self.composer = ComposerState::default();
+                                self.cache = MarkdownCache::default();
+                            }
+                        }
+                        "resume" => self.start_session_picker(),
+                        _ => {}
                     }
-                    if name == "model" {
-                        self.model.start(&self.runtime);
-                        self.composer = ComposerState::default();
-                        self.model.apply_filter(self.composer.text());
-                        return AppAction::None;
-                    }
-                    let detail = if args.is_empty() { String::new() } else { args };
-                    let summary = if detail.is_empty() {
-                        format!("Ran /{name}")
-                    } else {
-                        format!("Ran /{name} {detail}")
-                    };
-                    let index = self.chat.start_tool(name, detail);
-                    self.chat
-                        .finish_tool(index, ToolStatus::Success, summary);
                     AppAction::None
                 }
                 ComposerAction::None => AppAction::None,
@@ -140,7 +196,7 @@ impl App {
         let width = model_input_wrap_width(
             self.last_chat_width.max(content_width) as u16 + 3,
         )
-        .max(content_width);
+            .max(content_width);
         match self.model.handle_key(&mut self.composer, key, width) {
             ModelAction::None => AppAction::None,
             ModelAction::Cancelled => {
@@ -160,6 +216,47 @@ impl App {
         }
     }
 
+    fn handle_session_key(&mut self, key: KeyEvent, content_width: usize) -> AppAction {
+        let width = session_input_wrap_width(
+            self.last_chat_width.max(content_width) as u16 + 3,
+        )
+        .max(content_width);
+        match self.session.handle_key(&mut self.composer, key, width) {
+            SessionAction::None => AppAction::None,
+            SessionAction::Cancelled => {
+                self.composer = ComposerState::default();
+                AppAction::None
+            }
+            SessionAction::Selected(path) => {
+                self.composer = ComposerState::default();
+                match self.agent.open_session(path, &mut self.chat) {
+                    Ok(()) => self.cache = MarkdownCache::default(),
+                    Err(error) => self.chat.push(Role::Assistant, error),
+                }
+                AppAction::None
+            }
+            SessionAction::Error(error) => {
+                self.chat.push(Role::Assistant, error);
+                AppAction::None
+            }
+        }
+    }
+
+    fn start_session_picker(&mut self) {
+        if self.agent.is_running() {
+            self.chat.push(
+                Role::Assistant,
+                "Wait for the current response before opening sessions.".into(),
+            );
+            return;
+        }
+        self.session.start_loading(
+            self.agent.scan_sessions(),
+            self.agent.current_session_path(),
+        );
+        self.composer = ComposerState::default();
+    }
+
     pub fn insert_paste(&mut self, pasted: &str) {
         if self.connect.active() {
             self.connect.insert_paste(pasted);
@@ -169,12 +266,17 @@ impl App {
             self.model.insert_paste(&mut self.composer, pasted);
             return;
         }
+        if self.session.active() {
+            self.session.insert_paste(&mut self.composer, pasted);
+            return;
+        }
         self.composer.insert_paste(pasted);
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
         if self.connect.active()
             || self.model.active()
+            || self.session.active()
             || mouse.column as usize >= self.last_chat_width
             || mouse.row as usize >= self.last_chat_height
         {
@@ -196,6 +298,7 @@ impl App {
 
     pub fn tick(&mut self) {
         self.model.poll(&self.runtime);
+        self.session.poll(&self.runtime);
         self.agent.poll(&mut self.chat);
     }
 
@@ -216,6 +319,9 @@ impl App {
         }
         if self.model.active() {
             return self.draw_model(frame, padded);
+        }
+        if self.session.active() {
+            return self.draw_session(frame, padded);
         }
 
         let layout = shell_layout(padded, &self.composer, 0);
@@ -311,6 +417,42 @@ impl App {
 
         crate::frontend::connect::connect_input_wrap_width(panel.width)
     }
+
+    fn draw_session(&mut self, frame: &mut Frame, area: Rect) -> usize {
+        let palette_height = session_palette_height(
+            self.session.filtered().len(),
+            area.height.saturating_sub(2),
+        );
+        let palette = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(palette_height),
+            width: area.width,
+            height: palette_height,
+        };
+        if palette.y > area.y {
+            let chat = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: palette.y.saturating_sub(area.y),
+            };
+            let width = chat.width as usize;
+            self.last_chat_width = width;
+            self.last_chat_height = chat.height as usize;
+            frame.render_widget(self.chat.widget(&mut self.cache, width.max(1)), chat);
+        }
+        frame.render_widget(
+            SessionPaletteWidget::new(
+                &self.composer,
+                self.session.sessions(),
+                self.session.filtered(),
+                self.session.selected(),
+                self.session.status(),
+            ),
+            palette,
+        );
+        session_input_wrap_width(palette.width)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -370,16 +512,6 @@ mod tests {
     }
 
     #[test]
-    fn slash_command_shows_up_in_the_timeline() {
-        let rt = runtime();
-        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
-        app.insert_paste("/status");
-        assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
-        assert!(app.chat.contains_tool("status"));
-        assert_eq!(app.chat.last_role(), None);
-    }
-
-    #[test]
     fn connect_command_opens_provider_picker() {
         let rt = runtime();
         let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
@@ -396,6 +528,31 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
         assert!(app.model_active());
         assert_eq!(app.chat.last_role(), None);
+    }
+
+    #[test]
+    fn new_command_starts_with_an_empty_chat() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
+        app.chat.push(Role::User, "old session".into());
+
+        app.insert_paste("/new");
+        assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
+
+        assert!(app.chat.is_empty());
+        assert!(!app.session_active());
+    }
+
+    #[test]
+    fn resume_command_opens_session_picker() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
+
+        app.insert_paste("/resume");
+        assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
+
+        assert!(app.session_active());
+        assert_eq!(app.session.status(), "Session persistence is disabled.");
     }
 
     #[test]

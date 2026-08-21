@@ -73,9 +73,10 @@ pub fn filter_model_indices(models: &[ResolvedModel], query: &str) -> Vec<usize>
     })
 }
 
-pub fn save_default_model(model_id: &str) -> Result<(), String> {
+pub fn save_default_model(model_id: &str, api: &str) -> Result<(), String> {
     let mut settings = RaidSettings::load();
     settings.default_model = Some(model_id.to_string());
+    settings.default_api = Some(api.to_string());
     settings.save()
 }
 
@@ -125,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_model_indices_use_pi_style_fuzzy_search() {
+    fn filter_model_indices_use_scored_fuzzy_search() {
         let models = vec![
             sample_model("gpt-5.6-luna", "GPT-5.6 Luna"),
             sample_model("glm-5.2", "GLM-5.2"),

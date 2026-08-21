@@ -20,6 +20,17 @@ pub enum OpenCodeProtocol {
     GoogleGenerativeAi,
 }
 
+impl OpenCodeProtocol {
+    pub fn api_name(self) -> &'static str {
+        match self {
+            Self::OpenAiResponses => "openai-responses",
+            Self::OpenAiCompatible => "openai-compatible",
+            Self::AnthropicMessages => "anthropic-messages",
+            Self::GoogleGenerativeAi => "google-generative-ai",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProviderOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -19,6 +19,10 @@ pub fn settings_path() -> PathBuf {
     agent_dir().join("settings.json")
 }
 
+pub fn sessions_dir() -> PathBuf {
+    agent_dir().join("sessions")
+}
+
 pub fn catalog_cache_path(plan_slug: &str) -> PathBuf {
     agent_dir().join(format!("catalog-{plan_slug}.json"))
 }

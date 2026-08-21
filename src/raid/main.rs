@@ -9,7 +9,8 @@ use std::{
 };
 
 use anyhow::Result;
-use app::{App, AppAction};
+use app::{App, AppAction, LaunchOptions};
+use clap::Parser;
 use crossterm::{
     cursor::Show,
     event::{
@@ -24,7 +25,25 @@ use tracing_subscriber::EnvFilter;
 
 const FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_333);
 
+#[derive(Debug, Parser)]
+#[command(version, about)]
+struct Args {
+    /// Resume the most recently used session for this project
+    #[arg(short = 'c', long = "continue", conflicts_with_all = ["resume", "no_session", "session"])]
+    continue_session: bool,
+    /// Open the saved-session picker at startup
+    #[arg(short = 'r', long, conflicts_with_all = ["continue_session", "no_session", "session"])]
+    resume: bool,
+    /// Run without creating or writing session files
+    #[arg(long, conflicts_with_all = ["continue_session", "resume", "session"])]
+    no_session: bool,
+    /// Resume a specific session database
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["continue_session", "resume", "no_session"])]
+    session: Option<std::path::PathBuf>,
+}
+
 fn main() -> Result<()> {
+    let args = Args::parse();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -42,7 +61,15 @@ fn main() -> Result<()> {
         EnableMouseCapture,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
     ) {
-        Ok(()) => run(&mut terminal),
+        Ok(()) => run(
+            &mut terminal,
+            LaunchOptions {
+                continue_session: args.continue_session,
+                resume: args.resume,
+                no_session: args.no_session,
+                session: args.session,
+            },
+        ),
         Err(error) => Err(error.into()),
     };
     ratatui::restore();
@@ -57,9 +84,9 @@ fn main() -> Result<()> {
     result.and(cleanup.map_err(anyhow::Error::from))
 }
 
-fn run(terminal: &mut DefaultTerminal) -> Result<()> {
+fn run(terminal: &mut DefaultTerminal, launch: LaunchOptions) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
-    let mut app = App::new(runtime);
+    let mut app = App::new_with_launch(runtime, launch);
     let mut content_width = 0;
 
     'app: loop {
