@@ -71,39 +71,69 @@ pub fn filter_model_indices(models: &[ResolvedModel], query: &str) -> Vec<usize>
     if query.is_empty() {
         return (0..models.len()).collect();
     }
-    models
+    let mut matches: Vec<(usize, u8)> = models
         .iter()
         .enumerate()
         .filter_map(|(index, model)| {
-            if model_matches_query(query, &model.id, &model.name) {
-                Some(index)
-            } else {
-                None
-            }
+            match_rank(query, &model.id, &model.name).map(|rank| (index, rank))
         })
-        .collect()
+        .collect();
+    matches.sort_by(|(left, left_rank), (right, right_rank)| {
+        left_rank
+            .cmp(right_rank)
+            .then_with(|| left.cmp(right))
+    });
+    matches.into_iter().map(|(index, _)| index).collect()
 }
 
-fn model_matches_query(query: &str, id: &str, name: &str) -> bool {
+fn match_rank(query: &str, id: &str, name: &str) -> Option<u8> {
     let query = query.to_ascii_lowercase();
-    if query.is_empty() {
-        return true;
-    }
     let id = id.to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
 
     if query.chars().count() == 1 {
-        let ch = query.chars().next().expect("checked length");
-        return starts_with_char(&id, ch)
+        let ch = query.chars().next()?;
+        if starts_with_char(&id, ch)
             || starts_with_char(&name, ch)
             || token_starts_with(&id, ch)
-            || token_starts_with(&name, ch);
+            || token_starts_with(&name, ch)
+        {
+            return Some(5);
+        }
+        return None;
     }
 
-    id.contains(&query)
-        || name.contains(&query)
-        || fuzzy_matches(&query, &id)
-        || fuzzy_matches(&query, &name)
+    if id.starts_with(&query) || name.starts_with(&query) {
+        return Some(0);
+    }
+    if id.contains(&query) {
+        return Some(1);
+    }
+    if name.contains(&query) {
+        return Some(2);
+    }
+    if compact_subsequence_contains(&id, &query) {
+        return Some(3);
+    }
+    None
+}
+
+fn compact_subsequence_contains(value: &str, query: &str) -> bool {
+    let compact: String = value
+        .chars()
+        .filter(|ch| !matches!(ch, '-' | '.' | '_' | ' '))
+        .collect();
+    let mut remainder = query.chars();
+    let mut next = remainder.next();
+    for ch in compact.chars() {
+        if Some(ch) == next {
+            next = remainder.next();
+            if next.is_none() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn starts_with_char(value: &str, ch: char) -> bool {
@@ -118,23 +148,6 @@ fn tokens(value: &str) -> impl Iterator<Item = &str> {
     value
         .split(|ch: char| matches!(ch, '-' | '.' | '_' | ' '))
         .filter(|token| !token.is_empty())
-}
-
-fn fuzzy_matches(query: &str, haystack: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    let mut remainder = query.chars();
-    let mut next = remainder.next();
-    for ch in haystack.chars() {
-        if Some(ch) == next {
-            next = remainder.next();
-            if next.is_none() {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 pub fn save_default_model(model_id: &str) -> Result<(), String> {
@@ -189,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_model_indices_supports_fuzzy_subsequence_and_substring() {
+    fn filter_model_indices_supports_substring_and_compact_matching() {
         let models = vec![
             sample_model("gpt-5.6-luna", "GPT-5.6 Luna"),
             sample_model("glm-5.2", "GLM-5.2"),
@@ -202,6 +215,7 @@ mod tests {
         assert_eq!(filter_model_indices(&models, "g56"), vec![0]);
         assert_eq!(filter_model_indices(&models, "flash"), vec![2]);
         assert_eq!(filter_model_indices(&models, "d"), vec![2]);
+        assert_eq!(filter_model_indices(&models, "lun"), vec![0]);
         assert!(filter_model_indices(&models, "zzzz").is_empty());
     }
 
