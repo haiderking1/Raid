@@ -6,6 +6,7 @@ use crate::backend::opencode::{
     file_cache, load_catalog, LoadCatalogOptions, MetadataCache, OpenCodeCatalog,
     ReqwestCatalogHttp, ResolvedModel,
 };
+use crate::config::fuzzy;
 use crate::config::{
     provider_by_id, resolve_api_key, AuthStore, ConnectProvider, RaidSettings, PROVIDERS,
 };
@@ -67,87 +68,9 @@ pub async fn refresh_connected_catalog_async() -> Result<OpenCodeCatalog, String
 }
 
 pub fn filter_model_indices(models: &[ResolvedModel], query: &str) -> Vec<usize> {
-    let query = query.trim();
-    if query.is_empty() {
-        return (0..models.len()).collect();
-    }
-    let mut matches: Vec<(usize, u8)> = models
-        .iter()
-        .enumerate()
-        .filter_map(|(index, model)| {
-            match_rank(query, &model.id, &model.name).map(|rank| (index, rank))
-        })
-        .collect();
-    matches.sort_by(|(left, left_rank), (right, right_rank)| {
-        left_rank
-            .cmp(right_rank)
-            .then_with(|| left.cmp(right))
-    });
-    matches.into_iter().map(|(index, _)| index).collect()
-}
-
-fn match_rank(query: &str, id: &str, name: &str) -> Option<u8> {
-    let query = query.to_ascii_lowercase();
-    let id = id.to_ascii_lowercase();
-    let name = name.to_ascii_lowercase();
-
-    if query.chars().count() == 1 {
-        let ch = query.chars().next()?;
-        if starts_with_char(&id, ch)
-            || starts_with_char(&name, ch)
-            || token_starts_with(&id, ch)
-            || token_starts_with(&name, ch)
-        {
-            return Some(5);
-        }
-        return None;
-    }
-
-    if id.starts_with(&query) || name.starts_with(&query) {
-        return Some(0);
-    }
-    if id.contains(&query) {
-        return Some(1);
-    }
-    if name.contains(&query) {
-        return Some(2);
-    }
-    if compact_subsequence_contains(&id, &query) {
-        return Some(3);
-    }
-    None
-}
-
-fn compact_subsequence_contains(value: &str, query: &str) -> bool {
-    let compact: String = value
-        .chars()
-        .filter(|ch| !matches!(ch, '-' | '.' | '_' | ' '))
-        .collect();
-    let mut remainder = query.chars();
-    let mut next = remainder.next();
-    for ch in compact.chars() {
-        if Some(ch) == next {
-            next = remainder.next();
-            if next.is_none() {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn starts_with_char(value: &str, ch: char) -> bool {
-    value.chars().next() == Some(ch)
-}
-
-fn token_starts_with(value: &str, ch: char) -> bool {
-    tokens(value).any(|token| token.chars().next() == Some(ch))
-}
-
-fn tokens(value: &str) -> impl Iterator<Item = &str> {
-    value
-        .split(|ch: char| matches!(ch, '-' | '.' | '_' | ' '))
-        .filter(|token| !token.is_empty())
+    fuzzy::fuzzy_filter_indices(models, query, |model| {
+        fuzzy::model_search_text(&model.id, &model.metadata_provider_id, &model.name)
+    })
 }
 
 pub fn save_default_model(model_id: &str) -> Result<(), String> {
@@ -202,20 +125,23 @@ mod tests {
     }
 
     #[test]
-    fn filter_model_indices_supports_substring_and_compact_matching() {
+    fn filter_model_indices_use_pi_style_fuzzy_search() {
         let models = vec![
             sample_model("gpt-5.6-luna", "GPT-5.6 Luna"),
             sample_model("glm-5.2", "GLM-5.2"),
             sample_model("deepseek-v4-flash", "DeepSeek V4 Flash"),
             sample_model("kimi-k2.7-code", "Kimi K2.7 Code"),
             sample_model("ox-alpha-free", "Ox Alpha Free"),
+            sample_model("qwen3.7-plus", "Qwen3.7 Plus"),
+            sample_model("qwen3.6-plus", "Qwen3.6 Plus"),
         ];
-        assert_eq!(filter_model_indices(&models, ""), vec![0, 1, 2, 3, 4]);
+        assert_eq!(filter_model_indices(&models, ""), vec![0, 1, 2, 3, 4, 5, 6]);
         assert_eq!(filter_model_indices(&models, "glm"), vec![1]);
         assert_eq!(filter_model_indices(&models, "g56"), vec![0]);
         assert_eq!(filter_model_indices(&models, "flash"), vec![2]);
-        assert_eq!(filter_model_indices(&models, "d"), vec![2]);
-        assert_eq!(filter_model_indices(&models, "lun"), vec![0]);
+        assert_eq!(filter_model_indices(&models, "lun"), vec![0, 5, 6]);
+        assert_eq!(filter_model_indices(&models, "lu"), vec![0, 5, 6]);
+        assert!(!filter_model_indices(&models, "lun").contains(&4));
         assert!(filter_model_indices(&models, "zzzz").is_empty());
     }
 

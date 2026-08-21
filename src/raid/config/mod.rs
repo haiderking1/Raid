@@ -1,4 +1,5 @@
 mod auth;
+mod fuzzy;
 mod models;
 mod paths;
 mod providers;

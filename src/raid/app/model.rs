@@ -314,6 +314,7 @@ mod tests {
         let mut composer = ComposerState::default();
         flow.handle_key(&mut composer, key(KeyCode::Char('g')), 40);
         flow.handle_key(&mut composer, key(KeyCode::Char('p')), 40);
+        flow.handle_key(&mut composer, key(KeyCode::Char('t')), 40);
         assert_eq!(flow.filtered().len(), 1);
         assert_eq!(flow.models()[flow.filtered()[0]].id, "gpt-5.6-luna");
     }
