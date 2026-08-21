@@ -25,12 +25,21 @@ impl ComposerState {
             return ComposerAction::None;
         }
 
-        if key.code == KeyCode::Esc
-            || (key.code == KeyCode::Char('c')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-                && !key.modifiers.contains(KeyModifiers::ALT))
-        {
+        if key.code == KeyCode::Esc {
             return ComposerAction::Quit;
+        }
+
+        if key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            if self.text.is_empty() {
+                return ComposerAction::Quit;
+            }
+            self.text.clear();
+            self.cursor = 0;
+            self.vertical_column = None;
+            return ComposerAction::None;
         }
 
         if !matches!(key.code, KeyCode::Up | KeyCode::Down) {
@@ -176,7 +185,7 @@ impl<'a> ComposerWidget<'a> {
 
     pub fn cursor_position(area: Rect, state: &ComposerState) -> Option<(u16, u16)> {
         let inner = Self::block().inner(area);
-        let content_width = inner.width.saturating_sub(2) as usize;
+        let content_width = inner.width.saturating_sub(3) as usize;
         if content_width == 0 || inner.height == 0 {
             return None;
         }
@@ -201,7 +210,7 @@ impl<'a> ComposerWidget<'a> {
 
     fn block() -> Block<'static> {
         Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP | Borders::BOTTOM)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(96, 96, 96)))
     }
@@ -213,7 +222,7 @@ impl Widget for ComposerWidget<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
-        let content_width = inner.width.saturating_sub(2) as usize;
+        let content_width = inner.width.saturating_sub(3) as usize;
         if content_width == 0 || inner.height == 0 {
             return;
         }
@@ -612,20 +621,23 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "╭");
-        assert_eq!(buffer.cell((1, 1)).unwrap().symbol(), ">");
-        assert_eq!(buffer.cell((11, 1)).unwrap().symbol(), "│");
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "─");
+        assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "─");
+        assert_eq!(buffer.cell((0, 1)).unwrap().symbol(), ">");
+        assert_eq!(buffer.cell((2, 1)).unwrap().symbol(), "j");
+        assert_eq!(buffer.cell((3, 1)).unwrap().symbol(), "k");
+        assert_eq!(buffer.cell((11, 1)).unwrap().symbol(), " ");
         assert_eq!(
             ComposerWidget::cursor_position(Rect::new(0, 0, 12, 3), &composer),
-            Some((6, 1))
+            Some((4, 1))
         );
     }
 
     #[test]
     fn creates_a_caret_row_when_text_fills_the_line() {
         let mut composer = ComposerState::default();
-        composer.insert_paste("12345678");
-        assert_eq!(composer.desired_height(8, 20), 4);
+        composer.insert_paste("123456789");
+        assert_eq!(composer.desired_height(9, 20), 4);
 
         let mut terminal = Terminal::new(TestBackend::new(12, 4)).unwrap();
         terminal
@@ -636,7 +648,7 @@ mod tests {
 
         assert_eq!(
             ComposerWidget::cursor_position(Rect::new(0, 0, 12, 4), &composer),
-            Some((3, 2))
+            Some((2, 2))
         );
     }
 
@@ -644,7 +656,7 @@ mod tests {
     fn renders_a_placeholder_for_a_wide_glyph_on_a_one_cell_line() {
         let mut composer = ComposerState::default();
         composer.insert_paste("界");
-        let mut terminal = Terminal::new(TestBackend::new(5, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(4, 4)).unwrap();
 
         terminal
             .draw(|frame| {
@@ -653,7 +665,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            terminal.backend().buffer().cell((3, 1)).unwrap().symbol(),
+            terminal.backend().buffer().cell((2, 1)).unwrap().symbol(),
             "…"
         );
     }
@@ -672,11 +684,11 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((3, 1)).unwrap().symbol(), "o");
-        assert_eq!(buffer.cell((3, 2)).unwrap().symbol(), "t");
+        assert_eq!(buffer.cell((2, 1)).unwrap().symbol(), "o");
+        assert_eq!(buffer.cell((2, 2)).unwrap().symbol(), "t");
         assert_eq!(
             ComposerWidget::cursor_position(Rect::new(0, 0, 12, 4), &composer),
-            Some((6, 2))
+            Some((5, 2))
         );
     }
 
@@ -701,5 +713,57 @@ mod tests {
 
         assert_eq!(composer.handle_key(key(KeyCode::Esc)), ComposerAction::Quit);
         assert_eq!(composer.text, "x");
+    }
+
+    #[test]
+    fn ctrl_c_clears_text_without_quitting() {
+        let mut composer = ComposerState::default();
+        composer.insert_paste("draft\nline");
+        composer.handle_key(key(KeyCode::Up));
+
+        assert_eq!(
+            composer.handle_key(modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ComposerAction::None
+        );
+        assert_eq!(composer, ComposerState::default());
+        assert_eq!(
+            composer.handle_key(modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ComposerAction::Quit
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_when_the_composer_is_empty() {
+        let mut composer = ComposerState::default();
+
+        assert_eq!(
+            composer.handle_key(modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ComposerAction::Quit
+        );
+        assert_eq!(composer, ComposerState::default());
+    }
+
+    #[test]
+    fn ctrl_c_clears_whitespace_without_quitting() {
+        let mut composer = ComposerState::default();
+        composer.insert_paste("  \n");
+
+        assert_eq!(
+            composer.handle_key(modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ComposerAction::None
+        );
+        assert_eq!(composer, ComposerState::default());
+    }
+
+    #[test]
+    fn ctrl_alt_c_inserts_instead_of_clearing() {
+        let mut composer = ComposerState::default();
+        let alt_gr_c = KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+
+        assert_eq!(composer.handle_key(alt_gr_c), ComposerAction::None);
+        assert_eq!(composer.text, "c");
     }
 }

@@ -78,13 +78,13 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
 fn draw(frame: &mut ratatui::Frame, composer: &ComposerState) -> usize {
     let padded = frame.area().inner(Margin {
         vertical: 1,
-        horizontal: 3,
+        horizontal: 0,
     });
     if padded.width < 5 || padded.height < 3 {
         return 0;
     }
 
-    let content_width = padded.width.saturating_sub(4) as usize;
+    let content_width = padded.width.saturating_sub(3) as usize;
     let composer_height = composer.desired_height(content_width, padded.height);
     let composer_area = Rect {
         x: padded.x,
