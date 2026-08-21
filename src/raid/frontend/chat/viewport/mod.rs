@@ -1,5 +1,9 @@
+mod item;
+
 use super::cache::MarkdownCache;
 use crate::frontend::clip::render_clipped;
+use crate::frontend::tools::{ToolCall, ToolStatus, paint_header, paint_result};
+use item::TimelineItem;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -17,31 +21,52 @@ const ASSISTANT_PREFIX: &str = "● ";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     User,
-    #[cfg_attr(not(test), expect(dead_code))]
     Assistant,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatMessage {
-    pub role: Role,
-    pub body: String,
 }
 
 #[derive(Debug, Default)]
 pub struct ViewportState {
-    messages: Vec<ChatMessage>,
+    items: Vec<TimelineItem>,
     scroll_from_bottom: usize,
 }
 
 impl ViewportState {
     pub fn push(&mut self, role: Role, body: String) {
-        self.messages.push(ChatMessage { role, body });
+        self.items.push(TimelineItem::message(role, body));
         self.scroll_from_bottom = 0;
+    }
+
+    pub fn start_tool(&mut self, name: impl Into<String>, detail: impl Into<String>) -> usize {
+        self.items.push(TimelineItem::tool(name, detail));
+        self.scroll_from_bottom = 0;
+        self.items.len() - 1
+    }
+
+    pub fn finish_tool(&mut self, index: usize, status: ToolStatus, summary: impl Into<String>) {
+        if let Some(TimelineItem::Tool(call)) = self.items.get_mut(index) {
+            call.finish(status, summary);
+        }
     }
 
     #[cfg_attr(not(test), expect(dead_code))]
     pub fn is_empty(&self) -> bool {
-        self.messages.is_empty()
+        self.items.is_empty()
+    }
+
+    #[cfg(test)]
+    pub fn last_role(&self) -> Option<Role> {
+        self.items.iter().rev().find_map(|item| match item {
+            TimelineItem::Message { role, .. } => Some(*role),
+            TimelineItem::Tool(_) => None,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn contains_tool(&self, name: &str) -> bool {
+        self.items.iter().any(|item| match item {
+            TimelineItem::Tool(call) => call.name == name,
+            TimelineItem::Message { .. } => false,
+        })
     }
 
     pub fn scroll_up(&mut self, page: usize, content_height: usize, view_height: usize) {
@@ -66,26 +91,49 @@ impl ViewportState {
 
     fn rendered_rows(&self, cache: &mut MarkdownCache, width: usize) -> Vec<RenderedRow> {
         let mut rows = Vec::new();
-        for message in &self.messages {
-            let prefix_width = Line::from(prefix(message.role, true)).width();
-            let body_width = width.saturating_sub(prefix_width).max(1);
-            let mut body = cache.lines(&message.body, body_width).to_vec();
-            if body.is_empty() {
-                body.push(Line::default());
+        for (index, item) in self.items.iter().enumerate() {
+            match item {
+                TimelineItem::Message { role, body } => {
+                    push_message_rows(&mut rows, cache, width, *role, body);
+                    if self.items.get(index + 1).is_some() {
+                        rows.push(RenderedRow::Gap);
+                    }
+                }
+                TimelineItem::Tool(call) => {
+                    rows.push(RenderedRow::ToolHeader(call.clone()));
+                    rows.push(RenderedRow::ToolResult(call.clone()));
+                    if self.items.get(index + 1).is_some() {
+                        rows.push(RenderedRow::Gap);
+                    }
+                }
             }
-            for (index, line) in body.into_iter().enumerate() {
-                rows.push(RenderedRow::Line {
-                    role: message.role,
-                    first: index == 0,
-                    line,
-                });
-            }
-            rows.push(RenderedRow::Gap);
         }
         if matches!(rows.last(), Some(RenderedRow::Gap)) {
             rows.pop();
         }
         rows
+    }
+}
+
+fn push_message_rows(
+    rows: &mut Vec<RenderedRow>,
+    cache: &mut MarkdownCache,
+    width: usize,
+    role: Role,
+    body: &str,
+) {
+    let prefix_width = Line::from(prefix(role, true)).width();
+    let body_width = width.saturating_sub(prefix_width).max(1);
+    let mut body = cache.lines(body, body_width).to_vec();
+    if body.is_empty() {
+        body.push(Line::default());
+    }
+    for (index, line) in body.into_iter().enumerate() {
+        rows.push(RenderedRow::Line {
+            role,
+            first: index == 0,
+            line,
+        });
     }
 }
 
@@ -95,6 +143,8 @@ enum RenderedRow {
         first: bool,
         line: Line<'static>,
     },
+    ToolHeader(ToolCall),
+    ToolResult(ToolCall),
     Gap,
 }
 
@@ -120,6 +170,12 @@ impl Widget for ViewportWidget {
             match item {
                 RenderedRow::Line { role, first, line } => {
                     paint_message(buf, area, y, *role, *first, line);
+                }
+                RenderedRow::ToolHeader(call) => {
+                    paint_header(buf, area, y, call);
+                }
+                RenderedRow::ToolResult(call) => {
+                    paint_result(buf, area, y, call);
                 }
                 RenderedRow::Gap => {}
             }
@@ -188,6 +244,7 @@ fn paint_message(buf: &mut Buffer, area: Rect, y: u16, role: Role, first: bool, 
 mod tests {
     use super::{Role, USER_BAR, ViewportState};
     use crate::frontend::chat::cache::MarkdownCache;
+    use crate::frontend::tools::ToolStatus;
     use ratatui::{Terminal, backend::TestBackend, style::Color};
 
     fn screen(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
@@ -209,7 +266,7 @@ mod tests {
         viewport.scroll_from_bottom = 4;
         viewport.push(Role::User, "two".into());
         assert_eq!(viewport.scroll_from_bottom, 0);
-        assert_eq!(viewport.messages.len(), 2);
+        assert_eq!(viewport.items.len(), 2);
     }
 
     #[test]
@@ -285,5 +342,53 @@ mod tests {
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), ">");
         assert_eq!(buffer.cell((2, 0)).unwrap().symbol(), "h");
         assert_eq!(buffer.cell((0, 7)).unwrap().symbol(), " ");
+    }
+
+    #[test]
+    fn tools_sit_between_assistant_turns() {
+        let mut viewport = ViewportState::default();
+        viewport.push(Role::Assistant, "I'll inspect the entrypoint.".into());
+        let read = viewport.start_tool("read", "src/raid/main.rs");
+        viewport.finish_tool(
+            read,
+            ToolStatus::Success,
+            "Read 42 lines (ctrl+r to expand)",
+        );
+        let bash = viewport.start_tool("bash", "cargo test --offline");
+        viewport.finish_tool(
+            bash,
+            ToolStatus::Success,
+            "Tests passed (ctrl+r to expand)",
+        );
+        viewport.push(Role::Assistant, "Done.".into());
+
+        let mut cache = MarkdownCache::default();
+        let mut terminal = Terminal::new(TestBackend::new(48, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(viewport.widget(&mut cache, 48), frame.area());
+            })
+            .unwrap();
+
+        let rendered = screen(&terminal, 48, 10);
+        let inspect = row_containing(&rendered, "inspect");
+        let read = row_containing(&rendered, "Read(");
+        let bash = row_containing(&rendered, "Bash(");
+        let result = row_containing(&rendered, "Tests passed");
+        let done = row_containing(&rendered, "Done");
+        assert_eq!(read, inspect + 2);
+        assert_eq!(bash, read + 3);
+        assert_eq!(done, result + 2);
+        assert!(rendered.contains("● Read(src/raid/main.rs)"));
+        assert!(rendered.contains("└ Read 42 lines (ctrl+r to expand)"));
+        assert!(rendered.contains("● Bash(cargo test --offline)"));
+        assert!(!rendered.contains('✓'));
+    }
+
+    fn row_containing(screen: &str, needle: &str) -> usize {
+        screen
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}"))
     }
 }

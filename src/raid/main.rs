@@ -50,10 +50,11 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut content_width = 0;
 
     loop {
+        app.tick();
         terminal.draw(|frame| {
             content_width = app.draw(frame);
         })?;
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if app.handle_key(key, content_width) == AppAction::Quit {

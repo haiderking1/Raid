@@ -1,20 +1,22 @@
+mod demo;
 mod layout;
 
 use crate::frontend::chat::{MarkdownCache, Role, ViewportState};
 use crate::frontend::composer::{ComposerAction, ComposerState, ComposerWidget};
-use crate::frontend::tools::{ToolLog, ToolStatus};
+use crate::frontend::tools::ToolStatus;
 use crossterm::event::{KeyCode, KeyEvent};
-use layout::{THINKING_RESERVE, shell_layout};
+use demo::Demo;
+use layout::shell_layout;
 use ratatui::{Frame, layout::Rect};
 
 #[derive(Default)]
 pub struct App {
     composer: ComposerState,
     chat: ViewportState,
-    tools: ToolLog,
     cache: MarkdownCache,
     last_chat_width: usize,
     last_chat_height: usize,
+    demo: Option<Demo>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,12 +45,19 @@ impl App {
                 ComposerAction::Quit => AppAction::Quit,
                 ComposerAction::Submit(message) => {
                     self.chat.push(Role::User, message);
+                    self.demo = Some(demo::Demo::new());
                     AppAction::None
                 }
                 ComposerAction::Command { name, args } => {
                     let detail = if args.is_empty() { String::new() } else { args };
-                    let index = self.tools.start(name, detail);
-                    self.tools.finish(index, ToolStatus::Success);
+                    let summary = if detail.is_empty() {
+                        format!("Ran /{name}")
+                    } else {
+                        format!("Ran /{name} {detail}")
+                    };
+                    let index = self.chat.start_tool(name, detail);
+                    self.chat
+                        .finish_tool(index, ToolStatus::Success, summary);
                     AppAction::None
                 }
                 ComposerAction::None => AppAction::None,
@@ -72,19 +81,13 @@ impl App {
             height: area.height.saturating_sub(1),
         };
 
-        let tools_height = self
-            .tools
-            .desired_height(padded.height.saturating_sub(3 + THINKING_RESERVE));
-        let layout = shell_layout(padded, &self.composer, tools_height);
+        let layout = shell_layout(padded, &self.composer, 0);
 
         if layout.chat.height > 0 {
             let width = layout.chat.width as usize;
             self.last_chat_width = width;
             self.last_chat_height = layout.chat.height as usize;
             frame.render_widget(self.chat.widget(&mut self.cache, width.max(1)), layout.chat);
-        }
-        if let Some(area) = layout.tools {
-            frame.render_widget(self.tools.widget(), area);
         }
         frame.render_widget(ComposerWidget::new(&self.composer), layout.composer);
         if let (Some(area), Some(widget)) = (layout.palette, self.composer.palette_widget()) {
@@ -100,6 +103,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{App, AppAction};
+    use crate::frontend::chat::Role;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -115,26 +119,29 @@ mod tests {
         }
         assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
         assert!(!app.chat.is_empty());
+        app.run_demo_to_end();
+        assert_eq!(app.chat.last_role(), Some(Role::Assistant));
+        assert!(app.chat.contains_tool("read"));
+        assert!(app.chat.contains_tool("bash"));
     }
 
     #[test]
-    fn slash_command_shows_up_in_the_tools_pane() {
+    fn slash_command_shows_up_in_the_timeline() {
         let mut app = App::default();
         app.insert_paste("/status");
         assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
-        assert!(!app.tools.is_empty());
-        assert!(app.chat.is_empty());
+        assert!(app.chat.contains_tool("status"));
+        assert_eq!(app.chat.last_role(), None);
     }
 
     #[test]
-    fn draw_shows_markdown_chat_and_the_tools_pane() {
+    fn draw_shows_markdown_chat_and_inline_tools() {
         let mut app = App::default();
         app.insert_paste("**hi**");
         app.handle_key(key(KeyCode::Enter), 40);
-        app.insert_paste("/status");
-        app.handle_key(key(KeyCode::Enter), 40);
+        app.run_demo_to_end();
 
-        let mut terminal = Terminal::new(TestBackend::new(48, 16)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(48, 32)).unwrap();
         terminal
             .draw(|frame| {
                 app.draw(frame);
@@ -143,24 +150,25 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let mut screen = String::new();
-        for y in 0..16 {
+        for y in 0..32 {
             for x in 0..48 {
                 screen.push_str(buffer.cell((x, y)).unwrap().symbol());
             }
             screen.push('\n');
         }
-        assert!(screen.contains("hi"));
-        assert!(!screen.contains("**"));
-        assert!(!screen.contains("you"));
-        assert!(screen.contains("status"));
-        assert!(screen.contains("done"));
+        assert!(screen.contains("DefaultTerminal"));
+        assert!(screen.contains("Read("));
+        assert!(screen.contains("Bash("));
+        assert!(screen.contains("└"));
+        assert!(screen.contains("ctrl+r"));
         assert!(screen.contains('>'));
-
-        let mut first_row = String::new();
-        for x in 0..48 {
-            first_row.push_str(buffer.cell((x, 0)).unwrap().symbol());
-        }
-        assert!(first_row.contains('>'));
-        assert!(first_row.contains("hi"));
+        assert!(screen.contains("agent loop"));
+        let inspect = screen.find("inspect").expect("inspect");
+        let read = screen.find("Read(").expect("Read");
+        let bash = screen.find("Bash(").expect("Bash");
+        let wrap_up = screen.find("Done").expect("Done");
+        assert!(inspect < read);
+        assert!(read < bash);
+        assert!(bash < wrap_up);
     }
 }
