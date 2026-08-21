@@ -5,9 +5,9 @@ use serde_json::{json, Map, Value};
 use super::complete_tool_call::complete_tool_call;
 use super::error::TransportError;
 use super::messages::StreamPart;
-use super::sse::{is_sse_terminal_sentinel, ParsedSseEvent};
+use super::sse::ParsedSseEvent;
 use super::stream_json::{parse_sse_json, provider_stream_error};
-use super::super::json::{is_record, read_string};
+use super::super::json::read_string;
 use super::usage::{chat_finish_reason, merge_usage, token_usage_from_openai, FinishReason, TokenUsage};
 
 const INTERLEAVED_REASONING_FIELDS: [&str; 4] =
@@ -271,6 +271,7 @@ fn interleaved_reasoning(delta: &Map<String, Value>) -> Option<InterleavedReason
     None
 }
 
+#[cfg(test)]
 pub fn process_openai_compatible_events(
     model_id: &str,
     events: &[ParsedSseEvent],
@@ -278,7 +279,7 @@ pub fn process_openai_compatible_events(
     let mut handler = OpenAiCompatibleHandler::new(model_id);
     let mut parts = Vec::new();
     for event in events {
-        if is_sse_terminal_sentinel(event) {
+        if super::sse::is_sse_terminal_sentinel(event) {
             break;
         }
         parts.extend(handler.push(event)?);
@@ -290,7 +291,7 @@ pub fn process_openai_compatible_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::opencode::transport::SseParser;
+    use super::super::sse::SseParser;
 
     #[test]
     fn streams_text_and_finish() {

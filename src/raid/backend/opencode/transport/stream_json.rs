@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 
 use super::error::TransportError;
-use super::super::json::{is_record, read_string};
+use super::super::json::read_string;
 
 pub fn parse_sse_json(data: &str, retryable: bool) -> Result<Map<String, Value>, TransportError> {
     let parsed: Value = serde_json::from_str(data).map_err(|cause| {

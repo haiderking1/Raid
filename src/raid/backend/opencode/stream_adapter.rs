@@ -1,12 +1,11 @@
 use crate::backend::agent::{
-    assistant_message, assistant_message_stream, empty_usage, AssistantContent, AssistantMessage,
+    assistant_message, empty_usage, AssistantContent, AssistantMessage,
     AssistantMessageEvent, AssistantMessageStream, Model, StopReason, TextContent, ToolCall,
 };
 use crate::backend::opencode::transport::{FinishReason, StreamPart, TokenUsage, TransportError};
 
 pub struct StreamPartEmitter {
     stream: AssistantMessageStream,
-    model: Model,
     partial: AssistantMessage,
     text_index: Option<u64>,
     thinking_index: Option<u64>,
@@ -21,7 +20,6 @@ impl StreamPartEmitter {
         let partial = empty_assistant(&model);
         Self {
             stream,
-            model,
             partial,
             text_index: None,
             thinking_index: None,

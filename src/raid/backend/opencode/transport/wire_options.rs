@@ -2,19 +2,6 @@ use serde_json::{Map, Value};
 
 use super::super::types::ProviderOptions;
 
-pub fn provider_options_record<'a>(
-    provider_options: &'a ProviderOptions,
-    key: &str,
-) -> Option<&'a Map<String, Value>> {
-    match key {
-        "openai" => provider_options.openai.as_ref(),
-        "openaiCompatible" => provider_options.openai_compatible.as_ref(),
-        "anthropic" => provider_options.anthropic.as_ref(),
-        "google" => provider_options.google.as_ref(),
-        _ => None,
-    }
-}
-
 pub fn openai_responses_reasoning(provider_options: &ProviderOptions) -> Option<Map<String, Value>> {
     let openai = provider_options.openai.as_ref()?;
     let effort = openai.get("reasoningEffort")?.as_str()?;

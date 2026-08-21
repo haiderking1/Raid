@@ -14,11 +14,10 @@ use crate::backend::opencode::transport::{
     TransportError,
 };
 use crate::backend::opencode::stream_adapter::StreamPartEmitter;
-use crate::backend::opencode::types::{OpenCodePlan, OpenCodeProtocol, ProviderOptions};
+use crate::backend::opencode::types::{OpenCodeProtocol, ProviderOptions};
 
 #[derive(Clone)]
 pub struct OpenCodeStreamConfig {
-    pub plan: OpenCodePlan,
     pub client: Client,
     pub output_limit: u64,
 }

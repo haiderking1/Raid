@@ -22,7 +22,7 @@ fn reasoning_effort_maps_to_openai_compatible_wire_field() {
 
 #[test]
 fn google_protocol_is_unsupported_without_fetch() {
-    let error = super::unsupported_protocol_error("google-generative-ai", Some("secret"));
+    let error = super::http::unsupported_protocol_error("google-generative-ai", Some("secret"));
     assert_eq!(error.code, "unsupported-protocol");
     assert!(!error.message().contains("secret"));
 }
@@ -34,14 +34,14 @@ fn redacts_secret_in_stream_errors() {
         "network-error",
         true,
     );
-    let redacted = super::redact_stream_error(&error, Some("secret-value"));
+    let redacted = super::language_model::redact_stream_error(&error, Some("secret-value"));
     assert!(!redacted.message().contains("secret-value"));
 }
 
 #[test]
 fn anthropic_finish_reason_maps_end_turn_with_tools() {
     assert_eq!(
-        super::anthropic_finish_reason(Some("end_turn"), true),
+        super::usage::anthropic_finish_reason(Some("end_turn"), true),
         FinishReason::ToolCalls
     );
 }

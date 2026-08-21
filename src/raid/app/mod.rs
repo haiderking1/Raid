@@ -178,7 +178,6 @@ impl App {
             frame.render_widget(self.chat.widget(&mut self.cache, width.max(1)), chat);
         }
 
-        let panel_layout = crate::frontend::composer::padded_input_layout(panel);
         let header = self.connect.header_text();
         let widget = match self.connect.panel_step() {
             ConnectPanelStep::Provider => {
@@ -189,13 +188,12 @@ impl App {
                 self.connect.label_text(),
                 self.connect.footer_text().unwrap_or(""),
                 self.connect.input(),
-                panel_layout.wrap_width.max(1),
                 panel.height.saturating_sub(5).max(1),
             ),
         };
         frame.render_widget(widget, panel);
 
-        panel_layout.wrap_width.max(1)
+        crate::frontend::connect::connect_input_wrap_width(panel.width)
     }
 }
 

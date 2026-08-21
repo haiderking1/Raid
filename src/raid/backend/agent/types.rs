@@ -314,6 +314,7 @@ pub struct AfterToolCallResult {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct BeforeToolCallContext {
     pub assistant_message: AssistantMessage,
     pub tool_call: AgentToolCall,
@@ -322,6 +323,7 @@ pub struct BeforeToolCallContext {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct AfterToolCallContext {
     pub assistant_message: AssistantMessage,
     pub tool_call: AgentToolCall,
@@ -332,6 +334,7 @@ pub struct AfterToolCallContext {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct ShouldStopAfterTurnContext {
     pub message: AssistantMessage,
     pub tool_results: Vec<ToolResultMessage>,
@@ -508,6 +511,7 @@ pub fn assistant_message(content: Vec<AssistantContent>, stop_reason: StopReason
     }
 }
 
+#[cfg(test)]
 pub fn identity_convert(messages: Vec<AgentMessage>) -> Vec<LlmMessage> {
     messages
         .into_iter()
@@ -533,6 +537,7 @@ pub fn identity_convert(messages: Vec<AgentMessage>) -> Vec<LlmMessage> {
         .collect()
 }
 
+#[cfg(test)]
 pub async fn identity_convert_async(messages: Vec<AgentMessage>) -> Vec<LlmMessage> {
     identity_convert(messages)
 }

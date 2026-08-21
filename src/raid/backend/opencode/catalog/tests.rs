@@ -5,10 +5,24 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::super::catalog::effective_input_limit;
 use super::super::cache::MetadataCache;
 use super::super::catalog::{load_catalog, CatalogHttp, LoadCatalogOptions, ReqwestCatalogHttp};
-use super::super::endpoints::{plan_endpoints, METADATA_URL};
+use super::super::endpoints::{metadata_provider_id, plan_endpoints, METADATA_URL, PLAN_IDS};
 use super::super::types::{OpenCodePlan, SdkPackage};
+
+#[test]
+fn plan_ids_cover_supported_plans() {
+    assert_eq!(PLAN_IDS, [OpenCodePlan::Zen, OpenCodePlan::Go]);
+    assert_eq!(metadata_provider_id(OpenCodePlan::Zen), "opencode");
+    assert_eq!(metadata_provider_id(OpenCodePlan::Go), "opencode-go");
+}
+
+#[test]
+fn effective_input_limit_reserves_output_tokens() {
+    assert_eq!(effective_input_limit(32_000, None, 8_192).expect("limit"), 23_808);
+    assert!(effective_input_limit(4_096, None, 8_192).is_err());
+}
 
 struct MockHttp {
     responses: Mutex<HashMap<String, Value>>,

@@ -6,10 +6,6 @@ use super::error::CatalogError;
 use super::json::{assert_json_value, snapshot_safe_json};
 use super::types::{OpenCodeCatalog, OpenCodePlan, ResolvedModel};
 
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct CatalogValidationError(pub String);
-
 pub fn serialize_catalog(catalog: &OpenCodeCatalog) -> Result<Value, CatalogError> {
     validate_catalog_invariants(catalog)?;
     let value = serde_json::to_value(catalog).map_err(|error| {

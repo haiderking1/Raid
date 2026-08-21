@@ -33,8 +33,20 @@ pub fn plan_for_provider_id(id: &str) -> OpenCodePlan {
         .unwrap_or(OpenCodePlan::Go)
 }
 
-pub fn provider_label(id: &str) -> &str {
+#[cfg(test)]
+fn provider_label(id: &str) -> &str {
     provider_by_id(id)
         .map(|provider| provider.label)
         .unwrap_or(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{provider_label, PROVIDERS};
+
+    #[test]
+    fn provider_label_falls_back_to_id() {
+        assert_eq!(provider_label("opencode-go"), PROVIDERS[1].label);
+        assert_eq!(provider_label("unknown"), "unknown");
+    }
 }

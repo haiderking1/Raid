@@ -5,9 +5,9 @@ use serde_json::{json, Map, Value};
 use super::complete_tool_call::complete_tool_call;
 use super::error::TransportError;
 use super::messages::StreamPart;
-use super::sse::{is_sse_terminal_sentinel, ParsedSseEvent};
+use super::sse::ParsedSseEvent;
 use super::stream_json::{anthropic_provider_stream_error, parse_sse_json};
-use super::super::json::{is_record, read_string, snapshot_safe_json};
+use super::super::json::{read_string, snapshot_safe_json};
 use super::super::malformed_tool_call::malformed_tool_call_input;
 use super::usage::{
     anthropic_finish_reason, anthropic_usage, merge_usage, FinishReason, TokenUsage,
@@ -561,20 +561,4 @@ impl AnthropicMessagesHandler {
         }
         content
     }
-}
-
-pub fn process_anthropic_messages_events(
-    model_id: &str,
-    events: &[ParsedSseEvent],
-) -> Result<Vec<StreamPart>, TransportError> {
-    let mut handler = AnthropicMessagesHandler::new(model_id);
-    let mut parts = Vec::new();
-    for event in events {
-        if is_sse_terminal_sentinel(event) {
-            break;
-        }
-        parts.extend(handler.push(event)?);
-    }
-    parts.extend(handler.end()?);
-    Ok(parts)
 }

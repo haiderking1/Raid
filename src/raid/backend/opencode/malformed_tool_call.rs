@@ -17,9 +17,3 @@ pub fn malformed_tool_call_input(raw: &str) -> Value {
     })
 }
 
-pub fn is_malformed_tool_call_input(value: &Value) -> bool {
-    value
-        .get(MALFORMED_TOOL_ARGUMENTS_FLAG)
-        .and_then(|flag| flag.as_bool())
-        .unwrap_or(false)
-}

@@ -1,5 +1,3 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -11,11 +9,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     agent_loop, agent_loop_continue, set_default_stream_fn, AgentContext, AgentEvent, AgentLoopConfig,
-    AgentMessage, AgentTool, AssistantContent, AssistantMessage, AssistantMessageEvent, Model, StopReason,
-    TextContent, ToolCall, UserMessage, TOOL_EXECUTION_PARALLEL, TOOL_EXECUTION_SEQUENTIAL, StreamFn,
+    AgentMessage, AgentTool, AssistantContent, AssistantMessageEvent, Model, StopReason,
+    TextContent, ToolCall, UserMessage, TOOL_EXECUTION_PARALLEL, StreamFn,
 };
 use super::{
-    assistant_message, assistant_message_stream, empty_usage, identity_convert_async, AgentLoopHandle,
+    assistant_message, assistant_message_stream, identity_convert_async, AgentLoopHandle,
     AgentToolResult,
 };
 
@@ -136,23 +134,6 @@ async fn collect_loop(mut handle: AgentLoopHandle) -> (Vec<AgentEvent>, Vec<Agen
     }
     let messages = result.await;
     (events, messages)
-}
-
-async fn collect_events_only(mut handle: AgentLoopHandle) -> Vec<AgentEvent> {
-    let mut events = Vec::new();
-    let mut result = handle.result;
-    loop {
-        tokio::select! {
-            event = handle.events.recv() => {
-                match event {
-                    Some(event) => events.push(event),
-                    None => break,
-                }
-            }
-            _ = &mut result => break,
-        }
-    }
-    events
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ impl CatalogError {
         }
     }
 
+    #[cfg(test)]
     pub fn with_cause(
         code: &'static str,
         message: impl Into<String>,
@@ -33,6 +34,7 @@ impl CatalogError {
         }
     }
 
+    #[cfg(test)]
     pub fn stale_cache(
         message: impl Into<String>,
         cause: CatalogError,

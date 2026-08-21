@@ -1,5 +1,6 @@
 mod action;
 mod dock;
+mod input;
 mod metrics;
 mod state;
 mod widget;
@@ -9,7 +10,8 @@ pub mod slash_commands;
 
 pub use action::ComposerAction;
 pub use dock::docked_layout;
-pub use metrics::{composer_input_layout, padded_input_layout, InputRowLayout};
+pub use input::paint_input_editor;
+pub use metrics::padded_input_layout;
 pub use state::ComposerState;
 pub use widget::ComposerWidget;
-pub use wrap::{visual_lines_for_cursor, ComposerLayout};
+pub use wrap::visual_lines_for_cursor;

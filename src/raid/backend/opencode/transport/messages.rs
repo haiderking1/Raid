@@ -1,6 +1,6 @@
 use serde_json::{Map, Value};
 
-use super::super::json::{is_record, stringify_json};
+use super::super::json::stringify_json;
 use super::super::types::ProviderOptions;
 use super::usage::TokenUsage;
 
@@ -13,6 +13,7 @@ pub enum MessageRole {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum AssistantPart {
     Text { text: String },
     Reasoning { text: String },
@@ -31,6 +32,7 @@ pub struct ToolResultPart {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum ToolResultOutput {
     Text { text: String },
     Json { value: Value },

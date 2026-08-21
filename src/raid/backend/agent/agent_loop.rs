@@ -10,8 +10,8 @@ use super::stream_fn::get_default_stream_fn;
 use super::types::{
     agent_loop_turn_update_from, AfterToolCallContext, AfterToolCallResult, AgentContext,
     AgentEvent, AgentLoopConfig, AgentMessage, AgentTool, AgentToolCall, AgentToolResult,
-    AssistantContent, AssistantMessage, AssistantMessageEvent, BeforeToolCallContext,
-    BeforeToolCallResult, LlmContext, ShouldStopAfterTurnContext, StopReason, TextContent,
+    AssistantMessage, AssistantMessageEvent, BeforeToolCallContext,
+    LlmContext, ShouldStopAfterTurnContext, StopReason, TextContent,
     ToolCall, ToolResultMessage, TOOL_EXECUTION_SEQUENTIAL,
 };
 use super::validation::validate_tool_arguments;
@@ -54,6 +54,7 @@ pub fn agent_loop(
     }
 }
 
+#[cfg(test)]
 pub fn agent_loop_continue(
     context: AgentContext,
     config: AgentLoopConfig,
@@ -99,7 +100,7 @@ pub async fn run_agent_loop(
     stream_fn: super::types::StreamFn,
 ) -> Vec<AgentMessage> {
     let mut new_messages = prompts.clone();
-    let mut current_context = AgentContext {
+    let current_context = AgentContext {
         system_prompt: context.system_prompt,
         messages: {
             let mut messages = context.messages;
@@ -134,6 +135,7 @@ pub async fn run_agent_loop(
     new_messages
 }
 
+#[cfg(test)]
 pub async fn run_agent_loop_continue(
     context: AgentContext,
     config: AgentLoopConfig,
@@ -780,7 +782,7 @@ async fn execute_prepared_tool_call(
 async fn finalize_executed_tool_call(
     current_context: &AgentContext,
     assistant_message: &AssistantMessage,
-    mut executed: ExecutedPreparedToolCall,
+    executed: ExecutedPreparedToolCall,
     config: &AgentLoopConfig,
     cancel: &CancellationToken,
 ) -> FinalizedToolCallOutcome {

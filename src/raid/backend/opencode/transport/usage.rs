@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::super::json::{is_record, read_finite_number};
+use super::super::json::read_finite_number;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TokenUsage {

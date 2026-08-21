@@ -8,7 +8,7 @@ use crate::backend::agent::{
     agent_loop, set_default_stream_fn, AgentContext, AgentEvent, AgentLoopConfig, AgentLoopHandle,
     AgentMessage, AssistantContent, AssistantMessage, Model, StreamFn, UserMessage,
 };
-use crate::config::{resolve_api_key, RaidSettings, DEFAULT_MODEL, DEFAULT_PROVIDER};
+use crate::config::{resolve_api_key, RaidSettings};
 use crate::frontend::chat::ViewportState;
 use crate::frontend::tools::ToolStatus;
 use serde_json::Value;
@@ -119,7 +119,13 @@ impl AgentSession {
     fn apply_event(&mut self, chat: &mut ViewportState, event: AgentEvent) {
         match event {
             AgentEvent::MessageStart { message } => self.on_message_start(chat, message),
-            AgentEvent::MessageUpdate { message, .. } => self.on_message_update(chat, message),
+            AgentEvent::MessageUpdate {
+                message,
+                assistant_message_event,
+            } => {
+                let _ = assistant_message_event;
+                self.on_message_update(chat, message);
+            }
             AgentEvent::MessageEnd { message } => self.on_message_end(message),
             AgentEvent::ToolExecutionStart {
                 tool_call_id,
@@ -131,7 +137,7 @@ impl AgentSession {
             }
             AgentEvent::ToolExecutionEnd {
                 tool_call_id,
-                tool_name: _,
+                tool_name,
                 result,
                 is_error,
             } => {
@@ -140,7 +146,7 @@ impl AgentSession {
                         .content
                         .first()
                         .map(|part| part.text.clone())
-                        .unwrap_or_else(|| "Done".into());
+                        .unwrap_or_else(|| format!("{tool_name} finished"));
                     chat.finish_tool(
                         index,
                         if is_error {
@@ -154,10 +160,21 @@ impl AgentSession {
             }
             AgentEvent::AgentEnd { messages } => {
                 for message in messages {
-                    if !matches!(message, AgentMessage::User(_)) {
+                    if message.role() != "user" {
                         self.context.messages.push(message);
                     }
                 }
+            }
+            AgentEvent::TurnEnd { message, tool_results } => {
+                let _ = (message, tool_results);
+            }
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id,
+                tool_name,
+                args,
+                partial_result,
+            } => {
+                let _ = (tool_call_id, tool_name, args, partial_result);
             }
             _ => {}
         }
@@ -183,6 +200,7 @@ impl AgentSession {
         }
     }
 
+    #[cfg(test)]
     pub fn drive_to_completion(&mut self, chat: &mut ViewportState) {
         let Some(handle) = self.handle.take() else {
             return;
@@ -195,6 +213,7 @@ impl AgentSession {
     }
 }
 
+#[cfg(test)]
 async fn collect_agent_events(
     mut handle: AgentLoopHandle,
 ) -> (Vec<AgentEvent>, Vec<AgentMessage>) {
@@ -239,7 +258,6 @@ pub fn install_default_stream_fn() {
     use crate::backend::opencode::{opencode_stream_fn, OpenCodeStreamConfig};
     let client = reqwest::Client::new();
     let config = OpenCodeStreamConfig {
-        plan: crate::config::plan_for_provider_id(DEFAULT_PROVIDER),
         client,
         output_limit: 8192,
     };
@@ -285,9 +303,4 @@ mod tests {
         session.drive_to_completion(&mut chat);
         assert_eq!(chat.last_role(), Some(Role::Assistant));
     }
-}
-
-#[cfg(test)]
-pub fn install_test_stream_fn() {
-    set_default_stream_fn(Some(test_stream_fn()));
 }

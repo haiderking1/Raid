@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +50,7 @@ impl AuthStore {
         );
     }
 
+    #[cfg(test)]
     pub fn remove_provider(&mut self, provider_id: &str) {
         self.providers.remove(provider_id);
     }
@@ -85,6 +85,22 @@ mod tests {
         store.save().expect("save");
         let loaded = AuthStore::load();
         assert_eq!(loaded.api_key_for("opencode-go"), Some("secret".into()));
+        let _ = fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("RAID_AGENT_DIR");
+        }
+    }
+
+    #[test]
+    fn remove_provider_clears_saved_key() {
+        let dir = temp_agent_dir();
+        unsafe {
+            std::env::set_var("RAID_AGENT_DIR", &dir);
+        }
+        let mut store = AuthStore::default();
+        store.set_api_key("opencode-go", "secret".into());
+        store.remove_provider("opencode-go");
+        assert!(store.api_key_for("opencode-go").is_none());
         let _ = fs::remove_dir_all(&dir);
         unsafe {
             std::env::remove_var("RAID_AGENT_DIR");

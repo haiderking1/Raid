@@ -1,8 +1,3 @@
-mod chrome;
-mod dock;
 mod panel;
-mod palette;
-mod prompt;
 
-pub use panel::{panel_height, ConnectPanelStep, ConnectPanelWidget};
-pub use palette::palette_height;
+pub use panel::{connect_input_wrap_width, panel_height, ConnectPanelStep, ConnectPanelWidget};

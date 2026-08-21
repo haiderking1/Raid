@@ -5,7 +5,6 @@ use unicode_segmentation::UnicodeSegmentation;
 pub struct VisualLine {
     pub start: usize,
     pub end: usize,
-    pub width: usize,
 }
 
 pub fn previous_grapheme_boundary(text: &str, cursor: usize) -> usize {
@@ -79,7 +78,6 @@ pub fn visual_lines(text: &str, width: usize) -> Vec<VisualLine> {
             lines.push(VisualLine {
                 start: logical_start,
                 end: logical_end,
-                width: 0,
             });
         } else {
             let mut segment_start = logical_start;
@@ -90,7 +88,6 @@ pub fn visual_lines(text: &str, width: usize) -> Vec<VisualLine> {
                     lines.push(VisualLine {
                         start: segment_start,
                         end: logical_start + offset,
-                        width: segment_width,
                     });
                     segment_start = logical_start + offset;
                     segment_width = 0;
@@ -100,7 +97,6 @@ pub fn visual_lines(text: &str, width: usize) -> Vec<VisualLine> {
             lines.push(VisualLine {
                 start: segment_start,
                 end: logical_end,
-                width: segment_width,
             });
         }
         logical_start = logical_end + '\n'.len_utf8();
@@ -109,14 +105,13 @@ pub fn visual_lines(text: &str, width: usize) -> Vec<VisualLine> {
     lines
 }
 
-pub fn visual_lines_for_cursor(text: &str, cursor: usize, width: usize) -> Vec<VisualLine> {
+pub fn visual_lines_for_cursor(text: &str, _cursor: usize, width: usize) -> Vec<VisualLine> {
     visual_lines(text, width.max(1))
 }
 
 pub struct ComposerLayout {
     pub lines: Vec<VisualLine>,
     pub cursor_line: usize,
-    pub cursor_width: usize,
     pub scroll_top: usize,
 }
 
@@ -126,13 +121,10 @@ impl ComposerLayout {
         let cursor_line = cursor_line(&lines, cursor);
         let visible_height = visible_height.max(1).min(lines.len());
         let scroll_top = cursor_line.saturating_sub(visible_height - 1);
-        let line = lines[cursor_line];
-        let cursor_width = Line::from(&text[line.start..cursor.min(line.end)]).width();
 
         Self {
             lines,
             cursor_line,
-            cursor_width,
             scroll_top,
         }
     }

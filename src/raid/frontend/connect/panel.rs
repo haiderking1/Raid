@@ -1,7 +1,6 @@
 use crate::config::{AuthStore, ConnectProvider, PROVIDERS};
 use crate::frontend::clip::render_clipped;
-use crate::frontend::clip::render_clipped_with_cursor;
-use crate::frontend::composer::{padded_input_layout, ComposerLayout, ComposerState};
+use crate::frontend::composer::{paint_input_editor, padded_input_layout, ComposerState};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -25,7 +24,6 @@ pub struct ConnectPanelWidget<'a> {
     label: Option<&'a str>,
     footer: Option<&'a str>,
     input: Option<&'a ComposerState>,
-    content_width: usize,
     input_height: u16,
 }
 
@@ -44,7 +42,6 @@ impl<'a> ConnectPanelWidget<'a> {
             label: None,
             footer: None,
             input: None,
-            content_width: 0,
             input_height: 0,
         }
     }
@@ -54,7 +51,6 @@ impl<'a> ConnectPanelWidget<'a> {
         label: &'a str,
         footer: &'a str,
         input: &'a ComposerState,
-        wrap_width: usize,
         input_height: u16,
     ) -> Self {
         Self {
@@ -64,7 +60,6 @@ impl<'a> ConnectPanelWidget<'a> {
             label: Some(label),
             footer: Some(footer),
             input: Some(input),
-            content_width: wrap_width.max(1),
             input_height: input_height.max(1),
         }
     }
@@ -101,14 +96,7 @@ impl Widget for ConnectPanelWidget<'_> {
                     row = paint_text_row(buf, area, row, label, Style::default().fg(TEXT));
                 }
                 if let Some(input) = self.input {
-                    row = paint_api_key_input(
-                        buf,
-                        area,
-                        row,
-                        input,
-                        self.content_width,
-                        self.input_height,
-                    );
+                    row = paint_api_key_input(buf, area, row, input, self.input_height);
                 }
                 if let Some(footer) = self.footer {
                     let _ = paint_text_row(buf, area, row, footer, Style::default().fg(MUTED));
@@ -155,46 +143,22 @@ fn paint_api_key_input(
     area: Rect,
     y: u16,
     input: &ComposerState,
-    wrap_width: usize,
     visible_height: u16,
 ) -> u16 {
-    let input_row = padded_input_layout(area);
-    if wrap_width == 0 || visible_height == 0 {
+    let row_layout = padded_input_layout(area);
+    if row_layout.wrap_width == 0 || visible_height == 0 {
         return y.saturating_add(visible_height.max(1));
     }
 
-    let layout = ComposerLayout::new(
-        input.text(),
-        input.cursor().min(input.text().len()),
-        wrap_width,
+    paint_input_editor(
+        buf,
+        row_layout,
+        input,
+        y,
         visible_height as usize,
+        Style::default().fg(TEXT),
+        Style::default().fg(TEXT),
     );
-    let text_style = Style::default().fg(TEXT);
-    let prompt_style = Style::default().fg(TEXT);
-
-    for (row_index, line) in layout
-        .lines
-        .iter()
-        .skip(layout.scroll_top)
-        .take(visible_height as usize)
-        .enumerate()
-    {
-        let line_index = layout.scroll_top + row_index;
-        let slice = &input.text()[line.start..line.end];
-        let cursor_offset = (line_index == layout.cursor_line).then(|| {
-            input.cursor().min(line.end).saturating_sub(line.start)
-        });
-        render_clipped_with_cursor(
-            buf,
-            input_row.text_x,
-            y + row_index as u16,
-            slice,
-            cursor_offset,
-            input_row.render_width,
-            text_style,
-        );
-    }
-    buf.set_string(input_row.prompt_x, y, ">", prompt_style);
     y.saturating_add(visible_height)
 }
 
@@ -290,15 +254,19 @@ pub fn panel_height(
     }
 }
 
+pub fn connect_input_wrap_width(area_width: u16) -> usize {
+    padded_input_layout(Rect::new(0, 0, area_width.max(1), 1))
+        .wrap_width
+        .max(1)
+}
+
 fn provider_panel_height() -> u16 {
     let list_rows = PROVIDERS.len().min(8).max(1) as u16;
     2 + 1 + 1 + list_rows + 1
 }
 
 fn api_key_panel_height(area_width: u16, max_height: u16, input: &ComposerState) -> u16 {
-    let wrap_width = padded_input_layout(Rect::new(0, 0, area_width.max(1), 1))
-        .wrap_width
-        .max(1);
+    let wrap_width = connect_input_wrap_width(area_width);
     let max_lines = max_height
         .saturating_sub(5)
         .max(1)
@@ -315,9 +283,12 @@ fn api_key_panel_height(area_width: u16, max_height: u16, input: &ComposerState)
 
 #[cfg(test)]
 mod tests {
-    use super::{api_key_panel_height, ConnectPanelStep, ConnectPanelWidget, panel_height};
-    use crate::frontend::composer::{padded_input_layout, ComposerState};
-    use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+    use super::{
+        api_key_panel_height, connect_input_wrap_width, ConnectPanelStep, ConnectPanelWidget,
+        panel_height,
+    };
+    use crate::frontend::composer::ComposerState;
+    use ratatui::{backend::TestBackend, layout::Rect, style::Modifier, Terminal};
 
     #[test]
     fn provider_panel_puts_list_below_prompt() {
@@ -356,7 +327,6 @@ mod tests {
             "Enter OpenCode API key",
             "(shift+enter newline, enter submit, esc cancel)",
             &input,
-            padded_input_layout(Rect::new(0, 0, 56, height)).wrap_width,
             height.saturating_sub(5),
         );
         let mut terminal = Terminal::new(TestBackend::new(56, height)).unwrap();
@@ -374,5 +344,37 @@ mod tests {
         assert!(row(3).contains('>'));
         assert!(row(3).contains("line-one"));
         assert!(row(4).contains("line-two"));
+    }
+
+    #[test]
+    fn api_key_input_keeps_inverse_cursor_on_a_full_line() {
+        let mut input = ComposerState::default();
+        input.insert_paste("123456789");
+        let width = 56u16;
+        let wrap_width = connect_input_wrap_width(width);
+        assert_eq!(wrap_width, 49);
+        let height = api_key_panel_height(width, 12, &input);
+        let widget = ConnectPanelWidget::api_key(
+            "Connect to OpenCode Go",
+            "Enter OpenCode API key",
+            "(shift+enter newline, enter submit, esc cancel)",
+            &input,
+            height.saturating_sub(5),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| frame.render_widget(widget, frame.area()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let input_y = 3;
+        assert_eq!(buffer.cell((12, input_y)).unwrap().symbol(), "9");
+        assert!(
+            buffer
+                .cell((13, input_y))
+                .unwrap()
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 }

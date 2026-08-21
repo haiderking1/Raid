@@ -4,10 +4,6 @@ use super::error::CatalogError;
 use super::malformed_tool_call::malformed_tool_call_input;
 use super::transport::TransportError;
 
-pub fn is_record(value: &Value) -> bool {
-    value.is_object()
-}
-
 pub fn read_string(value: &Value) -> Option<&str> {
     value.as_str()
 }
@@ -44,16 +40,9 @@ pub fn snapshot_safe_json(value: &Value) -> Result<Value, CatalogError> {
     }
 }
 
+#[cfg(test)]
 pub fn assert_json_value(value: &Value) -> Result<(), CatalogError> {
     snapshot_safe_json(value).map(|_| ())
-}
-
-pub fn clone_safe_json(value: &Value) -> Result<Value, CatalogError> {
-    snapshot_safe_json(value)
-}
-
-pub fn describe_json_value_problem(value: &Value) -> Option<String> {
-    snapshot_safe_json(value).err().map(|error| error.to_string())
 }
 
 pub fn parse_json_object(text: &str, code: &'static str) -> Result<Value, TransportError> {

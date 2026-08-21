@@ -1,7 +1,9 @@
 use reqwest::StatusCode;
 
 use super::error::TransportError;
-use super::super::redact::{redact_error, redact_secret};
+use super::super::redact::redact_error;
+#[cfg(test)]
+use super::super::redact::redact_secret;
 use super::super::json::stringify_json;
 use serde_json::Value;
 
@@ -64,6 +66,7 @@ pub fn join_endpoint(base_url: &str, path: &str) -> String {
     format!("{base}/{suffix}")
 }
 
+#[cfg(test)]
 pub fn unsupported_protocol_error(protocol: &str, api_key: Option<&str>) -> TransportError {
     TransportError::new(
         "unsupported-protocol",

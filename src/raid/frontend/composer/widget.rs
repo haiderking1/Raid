@@ -1,7 +1,6 @@
+use super::input::paint_input_editor;
 use super::metrics::composer_input_layout;
 use super::state::ComposerState;
-use super::wrap::ComposerLayout;
-use crate::frontend::clip::render_clipped_with_cursor;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -37,41 +36,15 @@ impl Widget for ComposerWidget<'_> {
             return;
         }
 
-        let prompt_style = Style::default().fg(Color::Rgb(190, 190, 190));
-        let text_style = Style::default().fg(Color::White);
-        let text_layout = ComposerLayout::new(
-            self.state.text(),
-            self.state.cursor().min(self.state.text().len()),
-            layout.wrap_width,
+        paint_input_editor(
+            buf,
+            layout,
+            self.state,
+            inner.y,
             inner.height as usize,
+            Style::default().fg(Color::White),
+            Style::default().fg(Color::Rgb(190, 190, 190)),
         );
-
-        for (row, line) in text_layout
-            .lines
-            .iter()
-            .skip(text_layout.scroll_top)
-            .take(inner.height as usize)
-            .enumerate()
-        {
-            let line_index = text_layout.scroll_top + row;
-            let slice = &self.state.text()[line.start..line.end];
-            let cursor_offset = (line_index == text_layout.cursor_line).then(|| {
-                self.state
-                    .cursor()
-                    .min(line.end)
-                    .saturating_sub(line.start)
-            });
-            render_clipped_with_cursor(
-                buf,
-                layout.text_x,
-                inner.y + row as u16,
-                slice,
-                cursor_offset,
-                layout.render_width,
-                text_style,
-            );
-        }
-        buf.set_string(inner.x, inner.y, ">", prompt_style);
     }
 }
 
@@ -79,7 +52,7 @@ impl Widget for ComposerWidget<'_> {
 mod tests {
     use super::ComposerWidget;
     use crate::frontend::composer::ComposerState;
-    use ratatui::{style::Modifier, Terminal, backend::TestBackend, layout::Rect};
+    use ratatui::{backend::TestBackend, style::Modifier, Terminal};
 
     #[test]
     fn renders_the_prompt_and_keeps_text_inside_the_border() {

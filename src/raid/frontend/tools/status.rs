@@ -2,7 +2,6 @@
 pub enum ToolStatus {
     Running,
     Success,
-    #[cfg_attr(not(test), expect(dead_code))]
     Failed,
 }
 
@@ -35,7 +34,6 @@ impl ToolCall {
         self
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub fn new(name: impl Into<String>, detail: impl Into<String>, status: ToolStatus) -> Self {
         let name = name.into();
         let detail = detail.into();
@@ -57,7 +55,6 @@ impl ToolCall {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code))]
 fn default_summary(name: &str, status: ToolStatus) -> String {
     match status {
         ToolStatus::Running => String::from("Running"),
@@ -74,7 +71,7 @@ fn default_summary(name: &str, status: ToolStatus) -> String {
 }
 
 impl ToolStatus {
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     pub fn label(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -83,7 +80,7 @@ impl ToolStatus {
         }
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     pub fn icon(self) -> &'static str {
         match self {
             Self::Running => "▸",

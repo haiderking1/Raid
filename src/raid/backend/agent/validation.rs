@@ -1,17 +1,10 @@
 use jsonschema::Validator;
 use serde_json::Value;
 
-use super::types::{AgentTool, AgentToolCall, ToolDefinition};
+use super::types::{AgentTool, AgentToolCall};
 
 pub fn validate_tool_arguments(tool: &dyn AgentTool, tool_call: &AgentToolCall) -> Result<Value, String> {
     validate_tool_arguments_schema(tool.parameters_schema(), tool_call)
-}
-
-pub fn validate_tool_arguments_definition(
-    tool: &ToolDefinition,
-    tool_call: &AgentToolCall,
-) -> Result<Value, String> {
-    validate_tool_arguments_schema(&tool.parameters, tool_call)
 }
 
 pub fn validate_tool_arguments_schema(schema: &Value, tool_call: &AgentToolCall) -> Result<Value, String> {

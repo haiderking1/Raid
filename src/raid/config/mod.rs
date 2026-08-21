@@ -3,12 +3,10 @@ mod paths;
 mod providers;
 mod settings;
 
-pub use auth::{AuthStore, Credential};
-pub use paths::{agent_dir, auth_path, settings_path};
-pub use providers::{
-    plan_for_provider_id, provider_by_id, provider_label, ConnectProvider, PROVIDERS,
-};
-pub use settings::{RaidSettings, DEFAULT_MODEL, DEFAULT_PROVIDER};
+pub use auth::AuthStore;
+pub use paths::auth_path;
+pub use providers::{plan_for_provider_id, ConnectProvider, PROVIDERS};
+pub use settings::RaidSettings;
 
 pub fn save_connection(provider_id: &str, api_key: &str) -> Result<(), String> {
     let mut auth = AuthStore::load();

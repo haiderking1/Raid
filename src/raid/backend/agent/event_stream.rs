@@ -62,18 +62,6 @@ impl<T: Clone + Send + 'static, R: Send + 'static> EventStream<T, R> {
         self.inner.notify.notify_waiters();
     }
 
-    pub async fn result(&self) -> R
-    where
-        R: Clone,
-    {
-        loop {
-            if let Some(result) = self.inner.result.lock().expect("event stream result lock").clone() {
-                return result;
-            }
-            self.inner.notify.notified().await;
-        }
-    }
-
     pub fn into_stream(self) -> impl Stream<Item = T> {
         let mut receiver_slot = self
             .inner

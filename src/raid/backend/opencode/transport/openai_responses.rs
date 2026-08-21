@@ -5,9 +5,9 @@ use serde_json::{json, Map, Value};
 use super::complete_tool_call::complete_tool_call;
 use super::error::TransportError;
 use super::messages::StreamPart;
-use super::sse::{is_sse_terminal_sentinel, ParsedSseEvent};
+use super::sse::ParsedSseEvent;
 use super::stream_json::{parse_sse_json, responses_provider_stream_error};
-use super::super::json::{is_record, read_string, snapshot_safe_json};
+use super::super::json::{read_string, snapshot_safe_json};
 use super::usage::{
     merge_usage, responses_finish_reason, token_usage_from_openai, FinishReason, TokenUsage,
 };
@@ -431,20 +431,4 @@ impl OpenAiResponsesHandler {
         };
         [pending, vec![finish]].concat()
     }
-}
-
-pub fn process_openai_responses_events(
-    model_id: &str,
-    events: &[ParsedSseEvent],
-) -> Result<Vec<StreamPart>, TransportError> {
-    let mut handler = OpenAiResponsesHandler::new(model_id);
-    let mut parts = Vec::new();
-    for event in events {
-        if is_sse_terminal_sentinel(event) {
-            break;
-        }
-        parts.extend(handler.push(event)?);
-    }
-    parts.extend(handler.end()?);
-    Ok(parts)
 }

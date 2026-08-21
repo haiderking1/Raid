@@ -4,6 +4,7 @@ use serde_json::Value;
 use super::types::{CostTier, InterleavedField, InterleavedFieldState, ModelCost, ModelModality, ModelStatus, SdkPackage};
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct AvailabilityResponse {
     #[serde(default)]
     pub object: Option<String>,
@@ -30,6 +31,7 @@ pub fn parse_availability_ids(payload: &Value) -> Result<Vec<String>, serde_json
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct MetadataProvider {
     pub id: String,
     pub name: String,
@@ -39,6 +41,7 @@ pub struct MetadataProvider {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct WireModel {
     pub id: String,
     pub name: String,
