@@ -8,6 +8,7 @@ use crate::backend::agent::{
     agent_loop, set_default_stream_fn, AgentContext, AgentEvent, AgentLoopConfig, AgentLoopHandle,
     AgentMessage, AssistantContent, AssistantMessage, Model, StreamFn, UserMessage,
 };
+use crate::backend::tools::{default_tools, ToolEnvironment};
 use crate::config::{resolve_api_key, RaidSettings};
 use crate::frontend::chat::ViewportState;
 use crate::frontend::tools::ToolStatus;
@@ -39,12 +40,13 @@ impl AgentSession {
             Arc::new(crate::backend::opencode::convert_agent_messages),
         );
         config.api_key = resolve_api_key(provider_id);
+        let tool_env = Arc::new(ToolEnvironment::new());
         Self {
             handle: None,
             context: AgentContext {
                 system_prompt: String::from("You are a helpful coding agent in a terminal UI."),
                 messages: Vec::new(),
-                tools: Vec::new(),
+                tools: default_tools(tool_env),
             },
             config,
             cancel: CancellationToken::new(),
@@ -144,9 +146,15 @@ impl AgentSession {
                 if let Some(index) = self.tool_indices.get(&tool_call_id).copied() {
                     let summary = result
                         .content
-                        .first()
-                        .map(|part| part.text.clone())
-                        .unwrap_or_else(|| format!("{tool_name} finished"));
+                        .iter()
+                        .filter_map(|part| part.as_text())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    let summary = if summary.is_empty() {
+                        format!("{tool_name} finished")
+                    } else {
+                        summary
+                    };
                     chat.finish_tool(
                         index,
                         if is_error {
@@ -170,11 +178,20 @@ impl AgentSession {
             }
             AgentEvent::ToolExecutionUpdate {
                 tool_call_id,
-                tool_name,
-                args,
                 partial_result,
+                ..
             } => {
-                let _ = (tool_call_id, tool_name, args, partial_result);
+                if let Some(index) = self.tool_indices.get(&tool_call_id).copied() {
+                    let summary = partial_result
+                        .content
+                        .iter()
+                        .filter_map(|part| part.as_text())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !summary.is_empty() {
+                        chat.update_tool(index, summary);
+                    }
+                }
             }
             _ => {}
         }

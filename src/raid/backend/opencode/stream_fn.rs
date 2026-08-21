@@ -116,8 +116,10 @@ async fn run_live_stream(
 
 pub mod adapter {
     use super::*;
-    use crate::backend::agent::{AgentMessage, AssistantContent, LlmMessage, ToolResultMessage};
-    use serde_json::Value;
+    use crate::backend::agent::{
+        AgentMessage, AssistantContent, LlmMessage, ToolResultMessage,
+    };
+    use serde_json::{json, Value};
 
     pub fn agent_messages_to_llm(messages: Vec<AgentMessage>) -> Vec<LlmMessage> {
         messages
@@ -127,21 +129,39 @@ pub mod adapter {
                     role: user.role,
                     content: Some(user.content),
                     tool_call_id: None,
+                    is_error: None,
                 }),
             AgentMessage::Assistant(assistant) => {
-                let text = assistant_text(&assistant);
+                let mut parts = Vec::new();
+                for content in &assistant.content {
+                    match content {
+                        AssistantContent::Text(text) => {
+                            parts.push(json!({ "type": "text", "text": text.text }));
+                        }
+                        AssistantContent::ToolCall(tool_call) => {
+                            parts.push(json!({
+                                "type": "toolCall",
+                                "id": tool_call.id,
+                                "name": tool_call.name,
+                                "arguments": tool_call.arguments,
+                            }));
+                        }
+                    }
+                }
                 Some(LlmMessage {
                     role: assistant.role.clone(),
-                    content: Some(Value::String(text)),
+                    content: Some(Value::Array(parts)),
                     tool_call_id: None,
+                    is_error: None,
                 })
             }
             AgentMessage::ToolResult(tool) => {
                 let text = tool_result_text(&tool);
                 Some(LlmMessage {
                     role: tool.role.clone(),
-                    content: Some(Value::String(text)),
+                    content: Some(json!([{ "type": "text", "text": text }])),
                     tool_call_id: Some(tool.tool_call_id.clone()),
+                    is_error: Some(tool.is_error),
                 })
             }
             })
@@ -176,19 +196,60 @@ pub mod adapter {
                     tool_results: Vec::new(),
                     provider_metadata: None,
                 }),
-                "assistant" => messages.push(Message {
-                    role: MessageRole::Assistant,
-                    content_text: None,
-                    assistant_parts: vec![crate::backend::opencode::transport::AssistantPart::Text {
-                        text: llm_message
-                            .content
-                            .as_ref()
-                            .and_then(content_to_string)
-                            .unwrap_or_default(),
-                    }],
-                    tool_results: Vec::new(),
-                    provider_metadata: None,
-                }),
+                "assistant" => {
+                    let mut assistant_parts = Vec::new();
+                    if let Some(Value::Array(items)) = &llm_message.content {
+                        for item in items {
+                            match item.get("type").and_then(Value::as_str) {
+                                Some("text") => {
+                                    if let Some(text) = item.get("text").and_then(Value::as_str) {
+                                        assistant_parts.push(
+                                            crate::backend::opencode::transport::AssistantPart::Text {
+                                                text: text.to_string(),
+                                            },
+                                        );
+                                    }
+                                }
+                                Some("toolCall") => {
+                                    assistant_parts.push(
+                                        crate::backend::opencode::transport::AssistantPart::ToolCall {
+                                            tool_call_id: item
+                                                .get("id")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or("tool")
+                                                .to_string(),
+                                            tool_name: item
+                                                .get("name")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or("tool")
+                                                .to_string(),
+                                            input: item
+                                                .get("arguments")
+                                                .cloned()
+                                                .unwrap_or(Value::Null),
+                                        },
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    } else if let Some(text) = llm_message
+                        .content
+                        .as_ref()
+                        .and_then(content_to_string)
+                    {
+                        assistant_parts.push(
+                            crate::backend::opencode::transport::AssistantPart::Text { text },
+                        );
+                    }
+                    messages.push(Message {
+                        role: MessageRole::Assistant,
+                        content_text: None,
+                        assistant_parts,
+                        tool_results: Vec::new(),
+                        provider_metadata: None,
+                    });
+                }
                 "toolResult" => {
                     let tool_call_id = llm_message
                         .tool_call_id
@@ -207,7 +268,7 @@ pub mod adapter {
                                     .and_then(content_to_string)
                                     .unwrap_or_default(),
                             }],
-                            is_error: false,
+                            is_error: llm_message.is_error.unwrap_or(false),
                         }],
                         provider_metadata: None,
                     });
@@ -245,24 +306,86 @@ pub mod adapter {
         }
     }
 
-    fn assistant_text(message: &crate::backend::agent::AssistantMessage) -> String {
-        message
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                AssistantContent::Text(text) => Some(text.text.clone()),
-                AssistantContent::ToolCall(_) => None,
-            })
-            .collect::<Vec<_>>()
-            .join("")
-    }
-
     fn tool_result_text(message: &ToolResultMessage) -> String {
         message
             .content
             .iter()
-            .map(|part| part.text.clone())
+            .filter_map(|part| part.as_text())
             .collect::<Vec<_>>()
             .join("")
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::adapter::{agent_messages_to_llm, llm_context_to_model_request};
+    use crate::backend::agent::{
+        assistant_message, AssistantContent, LlmContext, TextContent, ToolCall, ToolDefinition,
+        ToolResultContent, ToolResultMessage, UserMessage,
+    };
+    use crate::backend::opencode::transport::{AssistantPart, MessageRole};
+    use crate::backend::opencode::types::ProviderOptions;
+    use serde_json::json;
+
+    #[test]
+    fn preserves_assistant_tool_calls_in_model_request() {
+        let messages = vec![
+            crate::backend::agent::AgentMessage::User(UserMessage::new("run it")),
+            crate::backend::agent::AgentMessage::Assistant(assistant_message(
+                vec![
+                    AssistantContent::Text(TextContent::new("calling tool")),
+                    AssistantContent::ToolCall(ToolCall::new(
+                        "call-1",
+                        "bash",
+                        json!({ "command": "pwd" }),
+                    )),
+                ],
+                crate::backend::agent::StopReason::ToolUse,
+            )),
+            crate::backend::agent::AgentMessage::ToolResult(ToolResultMessage {
+                role: "toolResult".into(),
+                tool_call_id: "call-1".into(),
+                tool_name: "bash".into(),
+                content: vec![ToolResultContent::text("/tmp")],
+                details: None,
+                usage: None,
+                added_tool_names: None,
+                is_error: false,
+                timestamp: 0,
+            }),
+        ];
+        let llm_messages = agent_messages_to_llm(messages);
+        let request = llm_context_to_model_request(
+            &LlmContext {
+                system_prompt: None,
+                messages: llm_messages,
+                tools: vec![ToolDefinition {
+                    name: "bash".into(),
+                    description: "bash".into(),
+                    parameters: json!({ "type": "object" }),
+                }],
+            },
+            ProviderOptions::default(),
+        )
+        .expect("request");
+        let assistant = request
+            .messages
+            .iter()
+            .find(|message| message.role == MessageRole::Assistant)
+            .expect("assistant");
+        assert!(matches!(
+            assistant.assistant_parts.as_slice(),
+            [
+                AssistantPart::Text { text },
+                AssistantPart::ToolCall { tool_name, .. }
+            ] if text == "calling tool" && tool_name == "bash"
+        ));
+        let tool = request
+            .messages
+            .iter()
+            .find(|message| message.role == MessageRole::Tool)
+            .expect("tool");
+        assert_eq!(tool.tool_results[0].tool_call_id, "call-1");
+        assert!(!tool.tool_results[0].is_error);
     }
 }

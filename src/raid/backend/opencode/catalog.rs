@@ -359,7 +359,8 @@ fn resolve_model(
     })
 }
 
-pub fn effective_input_limit(
+#[cfg(test)]
+fn effective_input_limit(
     context_limit: u64,
     explicit_input_limit: Option<u64>,
     reserved_output_tokens: u64,

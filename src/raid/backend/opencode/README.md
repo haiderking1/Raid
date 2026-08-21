@@ -30,6 +30,8 @@ let catalog = load_catalog(LoadCatalogOptions {
 ```
 
 Cached catalogs are validated on read/write via `parse_cached_catalog` / `serialize_catalog`.
+Successful loads are persisted under `~/.raid/agent/catalog-{zen,go}.json` and reused on the next launch.
+The model picker reads the disk cache immediately and refreshes from the API in the background.
 
 ## Transports (handler layer)
 
@@ -47,9 +49,3 @@ Supporting modules: `messages`, `wire_options`, `usage`, `complete_tool_call`, `
 ```bash
 OPENCODE_LIVE_CATALOG=1 OPENCODE_API_KEY=... cargo test live_go_catalog
 ```
-
-## Not wired yet
-
-- Agent loop / TUI streaming integration
-- Async reqwest SSE streaming (`postSseRequest` + live body reader)
-- Filesystem metadata cache (memory cache only)

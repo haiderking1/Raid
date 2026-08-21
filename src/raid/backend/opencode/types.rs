@@ -32,12 +32,9 @@ pub struct ProviderOptions {
     pub google: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-#[cfg(test)]
 mod catalog_types {
     use super::{OpenCodePlan, OpenCodeProtocol, ProviderOptions};
     use serde::{Deserialize, Serialize};
-
-    use crate::backend::opencode::endpoints::protocol_for_sdk_package;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     pub enum SdkPackage {
@@ -53,7 +50,12 @@ mod catalog_types {
 
     impl SdkPackage {
         pub fn protocol(self) -> OpenCodeProtocol {
-            protocol_for_sdk_package(self)
+            match self {
+                SdkPackage::OpenAi => OpenCodeProtocol::OpenAiResponses,
+                SdkPackage::OpenAiCompatible => OpenCodeProtocol::OpenAiCompatible,
+                SdkPackage::Anthropic => OpenCodeProtocol::AnthropicMessages,
+                SdkPackage::Google => OpenCodeProtocol::GoogleGenerativeAi,
+            }
         }
     }
 
@@ -213,5 +215,4 @@ mod catalog_types {
     }
 }
 
-#[cfg(test)]
 pub use catalog_types::*;

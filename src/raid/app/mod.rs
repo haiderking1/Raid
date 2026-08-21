@@ -1,17 +1,20 @@
 mod agent;
 mod connect;
 mod layout;
+mod model;
 
 pub use agent::install_default_stream_fn;
 
 use crate::frontend::chat::{MarkdownCache, Role, ViewportState};
 use crate::frontend::composer::{ComposerAction, ComposerState, ComposerWidget};
 use crate::frontend::connect::{ConnectPanelStep, ConnectPanelWidget};
+use crate::frontend::model::{model_input_wrap_width, model_palette_height, ModelPaletteWidget};
 use crate::frontend::tools::ToolStatus;
 use agent::AgentSession;
 use connect::{ConnectAction, ConnectFlow};
 use crossterm::event::{KeyCode, KeyEvent};
 use layout::shell_layout;
+use model::{ModelAction, ModelFlow};
 use ratatui::{Frame, layout::Rect};
 
 pub struct App {
@@ -22,14 +25,16 @@ pub struct App {
     last_chat_height: usize,
     agent: AgentSession,
     connect: ConnectFlow,
+    model: ModelFlow,
+    runtime: tokio::runtime::Handle,
 }
 
 impl App {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
-        Self::with_agent(AgentSession::new(runtime))
+        Self::with_agent(AgentSession::new(runtime.clone()), runtime)
     }
 
-    fn with_agent(agent: AgentSession) -> Self {
+    fn with_agent(agent: AgentSession, runtime: tokio::runtime::Handle) -> Self {
         Self {
             composer: ComposerState::default(),
             chat: ViewportState::default(),
@@ -38,6 +43,8 @@ impl App {
             last_chat_height: 0,
             agent,
             connect: ConnectFlow::default(),
+            model: ModelFlow::default(),
+            runtime,
         }
     }
 
@@ -47,13 +54,21 @@ impl App {
     }
 
     #[cfg(test)]
+    pub(crate) fn model_active(&self) -> bool {
+        self.model.active()
+    }
+
+    #[cfg(test)]
     pub fn with_stream_fn(runtime: tokio::runtime::Handle, stream_fn: crate::backend::agent::StreamFn) -> Self {
-        Self::with_agent(AgentSession::new(runtime).with_stream_fn(stream_fn))
+        Self::with_agent(AgentSession::new(runtime.clone()).with_stream_fn(stream_fn), runtime)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, content_width: usize) -> AppAction {
         if self.connect.active() {
             return self.handle_connect_key(key, content_width);
+        }
+        if self.model.active() {
+            return self.handle_model_key(key, content_width);
         }
 
         match key.code {
@@ -83,6 +98,12 @@ impl App {
                         self.composer = ComposerState::default();
                         return AppAction::None;
                     }
+                    if name == "model" {
+                        self.model.start(&self.runtime);
+                        self.composer = ComposerState::default();
+                        self.model.apply_filter(self.composer.text());
+                        return AppAction::None;
+                    }
                     let detail = if args.is_empty() { String::new() } else { args };
                     let summary = if detail.is_empty() {
                         format!("Ran /{name}")
@@ -105,7 +126,33 @@ impl App {
             ConnectAction::Cancelled => AppAction::None,
             ConnectAction::Finished { summary } => {
                 self.agent.reload_credentials();
-                self.chat.push(Role::Assistant, summary);
+                if !summary.is_empty() {
+                    self.chat.push(Role::Assistant, summary);
+                }
+                AppAction::None
+            }
+        }
+    }
+
+    fn handle_model_key(&mut self, key: KeyEvent, content_width: usize) -> AppAction {
+        let width = model_input_wrap_width(
+            self.last_chat_width.max(content_width) as u16 + 3,
+        )
+        .max(content_width);
+        match self.model.handle_key(&mut self.composer, key, width) {
+            ModelAction::None => AppAction::None,
+            ModelAction::Cancelled => {
+                self.composer = ComposerState::default();
+                AppAction::None
+            }
+            ModelAction::Selected => {
+                self.agent.reload_credentials();
+                self.composer = ComposerState::default();
+                AppAction::None
+            }
+            ModelAction::Error { message } => {
+                self.composer = ComposerState::default();
+                self.chat.push(Role::Assistant, message);
                 AppAction::None
             }
         }
@@ -116,10 +163,15 @@ impl App {
             self.connect.insert_paste(pasted);
             return;
         }
+        if self.model.active() {
+            self.model.insert_paste(&mut self.composer, pasted);
+            return;
+        }
         self.composer.insert_paste(pasted);
     }
 
     pub fn tick(&mut self) {
+        self.model.poll(&self.runtime);
         self.agent.poll(&mut self.chat);
     }
 
@@ -138,6 +190,9 @@ impl App {
         if self.connect.active() {
             return self.draw_connect(frame, padded);
         }
+        if self.model.active() {
+            return self.draw_model(frame, padded);
+        }
 
         let layout = shell_layout(padded, &self.composer, 0);
 
@@ -152,6 +207,43 @@ impl App {
             frame.render_widget(widget, area);
         }
         layout.content_width
+    }
+
+    fn draw_model(&mut self, frame: &mut Frame, area: Rect) -> usize {
+        let palette_height = model_palette_height(
+            self.model.filtered().len(),
+            area.height.saturating_sub(2),
+        );
+        let palette = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(palette_height),
+            width: area.width,
+            height: palette_height,
+        };
+        if palette.y > area.y {
+            let chat = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: palette.y.saturating_sub(area.y),
+            };
+            let width = chat.width as usize;
+            self.last_chat_width = width;
+            self.last_chat_height = chat.height as usize;
+            frame.render_widget(self.chat.widget(&mut self.cache, width.max(1)), chat);
+        }
+
+        frame.render_widget(
+            ModelPaletteWidget::new(
+                &self.composer,
+                self.model.models(),
+                self.model.filtered(),
+                self.model.selected(),
+                self.model.status(),
+            ),
+            palette,
+        );
+        model_input_wrap_width(palette.width)
     }
 
     fn draw_connect(&mut self, frame: &mut Frame, area: Rect) -> usize {
@@ -259,6 +351,16 @@ mod tests {
         app.insert_paste("/connect");
         assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
         assert!(app.connect_active());
+    }
+
+    #[test]
+    fn model_command_opens_interactive_picker() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
+        app.insert_paste("/model");
+        assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
+        assert!(app.model_active());
+        assert_eq!(app.chat.last_role(), None);
     }
 
     #[test]

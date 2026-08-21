@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     agent_loop, agent_loop_continue, set_default_stream_fn, AgentContext, AgentEvent, AgentLoopConfig,
     AgentMessage, AgentTool, AssistantContent, AssistantMessageEvent, Model, StopReason,
-    TextContent, ToolCall, UserMessage, TOOL_EXECUTION_PARALLEL, StreamFn,
+    TextContent, ToolCall, ToolResultContent, UserMessage, TOOL_EXECUTION_PARALLEL, StreamFn,
 };
 use super::{
     assistant_message, assistant_message_stream, identity_convert_async, AgentLoopHandle,
@@ -36,6 +36,10 @@ struct EchoTool {
 #[async_trait]
 impl AgentTool for EchoTool {
     fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
         self.name
     }
 
@@ -69,11 +73,12 @@ impl AgentTool for EchoTool {
             .to_string();
         self.executed.lock().expect("executed lock").push(value.clone());
         AgentToolResult {
-            content: vec![TextContent::new(format!("echoed: {value}"))],
+            content: vec![ToolResultContent::text(format!("echoed: {value}"))],
             details: json!({ "value": value }),
             usage: None,
             added_tool_names: None,
             terminate: self.terminate,
+            is_error: false,
         }
     }
 }
@@ -301,9 +306,12 @@ async fn does_not_execute_length_truncated_tool_calls() {
         AgentEvent::ToolExecutionEnd { is_error, result, .. } if *is_error => Some(result.content.clone()),
         _ => None,
     });
-    assert!(tool_end
-        .and_then(|content| content.first().map(|part| part.text.contains("output token limit")))
-        .unwrap_or(false));
+    assert!(tool_end.is_some_and(|content| {
+        content
+            .first()
+            .and_then(|part| part.as_text())
+            .is_some_and(|text| text.contains("output token limit"))
+    }));
     assert_eq!(messages.last().map(|message| message.role()), Some("assistant"));
 }
 
@@ -411,6 +419,9 @@ async fn parallel_tool_execution_can_overlap() {
         fn name(&self) -> &str {
             "echo"
         }
+        fn description(&self) -> &str {
+            "echo"
+        }
         fn parameters_schema(&self) -> &Value {
             static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
             SCHEMA.get_or_init(echo_schema)
@@ -435,11 +446,12 @@ async fn parallel_tool_execution_can_overlap() {
             }
             self.executed.lock().expect("executed").push(value.clone());
             AgentToolResult {
-                content: vec![TextContent::new(format!("echoed: {value}"))],
+                content: vec![ToolResultContent::text(format!("echoed: {value}"))],
                 details: json!({ "value": value }),
                 usage: None,
                 added_tool_names: None,
                 terminate: false,
+                is_error: false,
             }
         }
     }

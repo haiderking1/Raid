@@ -166,13 +166,8 @@ impl ConnectFlow {
         }
         match save_connection(provider.id, key) {
             Ok(()) => {
-                let summary = format!(
-                    "Connected to {}. Credentials saved to {}",
-                    provider.label,
-                    crate::config::auth_path().display()
-                );
                 self.active = false;
-                ConnectAction::Finished { summary }
+                ConnectAction::Finished { summary: String::new() }
             }
             Err(error) => {
                 self.active = false;

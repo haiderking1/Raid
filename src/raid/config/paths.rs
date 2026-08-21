@@ -19,6 +19,10 @@ pub fn settings_path() -> PathBuf {
     agent_dir().join("settings.json")
 }
 
+pub fn catalog_cache_path(plan_slug: &str) -> PathBuf {
+    agent_dir().join(format!("catalog-{plan_slug}.json"))
+}
+
 fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)

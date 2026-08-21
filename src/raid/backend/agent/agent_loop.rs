@@ -11,10 +11,11 @@ use super::types::{
     agent_loop_turn_update_from, AfterToolCallContext, AfterToolCallResult, AgentContext,
     AgentEvent, AgentLoopConfig, AgentMessage, AgentTool, AgentToolCall, AgentToolResult,
     AssistantMessage, AssistantMessageEvent, BeforeToolCallContext,
-    LlmContext, ShouldStopAfterTurnContext, StopReason, TextContent,
+    LlmContext, ShouldStopAfterTurnContext, StopReason, ToolResultContent,
     ToolCall, ToolResultMessage, TOOL_EXECUTION_SEQUENTIAL,
 };
 use super::validation::validate_tool_arguments;
+use serde_json::Value;
 
 pub type AgentEventSink = Arc<dyn Fn(AgentEvent) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
@@ -334,7 +335,7 @@ async fn stream_assistant_response(
             .iter()
             .map(|tool| super::types::ToolDefinition {
                 name: tool.name().to_string(),
-                description: tool.name().to_string(),
+                description: tool.description().to_string(),
                 parameters: tool.parameters_schema().clone(),
             })
             .collect(),
@@ -771,11 +772,12 @@ async fn execute_prepared_tool_call(
         .await;
     accepting.store(false, std::sync::atomic::Ordering::Relaxed);
 
+    let is_error = result.is_error;
     ExecutedPreparedToolCall {
         tool_call: prepared.tool_call,
         args: prepared.args,
         result,
-        is_error: false,
+        is_error,
     }
 }
 
@@ -835,11 +837,12 @@ fn apply_after_tool_call(result: &mut AgentToolResult, is_error: &mut bool, afte
 
 fn error_tool_result(message: impl Into<String>) -> AgentToolResult {
     AgentToolResult {
-        content: vec![TextContent::new(message.into())],
-        details: serde_json::json!({}),
+        content: vec![ToolResultContent::text(message)],
+        details: Value::Null,
         usage: None,
         added_tool_names: None,
         terminate: false,
+        is_error: true,
     }
 }
 

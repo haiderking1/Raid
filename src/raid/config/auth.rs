@@ -61,8 +61,23 @@ impl AuthStore {
 }
 
 #[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock")
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_env::lock as env_lock;
     use std::sync::{Mutex, OnceLock};
 
     fn temp_agent_dir() -> std::path::PathBuf {
@@ -76,6 +91,7 @@ mod tests {
 
     #[test]
     fn round_trips_api_keys() {
+        let _guard = env_lock();
         let dir = temp_agent_dir();
         unsafe {
             std::env::set_var("RAID_AGENT_DIR", &dir);
@@ -93,6 +109,7 @@ mod tests {
 
     #[test]
     fn remove_provider_clears_saved_key() {
+        let _guard = env_lock();
         let dir = temp_agent_dir();
         unsafe {
             std::env::set_var("RAID_AGENT_DIR", &dir);

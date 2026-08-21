@@ -67,6 +67,45 @@ impl TextContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageContent {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub data: String,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+}
+
+impl ImageContent {
+    pub fn new(data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self {
+            kind: "image".into(),
+            data: data.into(),
+            mime_type: mime_type.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    Text(TextContent),
+    Image(ImageContent),
+}
+
+impl ToolResultContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text(TextContent::new(text))
+    }
+
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) => Some(&text.text),
+            Self::Image(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     #[serde(rename = "type")]
     pub kind: String,
@@ -133,7 +172,7 @@ pub struct ToolResultMessage {
     pub tool_call_id: String,
     #[serde(rename = "toolName")]
     pub tool_name: String,
-    pub content: Vec<TextContent>,
+    pub content: Vec<ToolResultContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,6 +209,8 @@ pub struct LlmMessage {
     pub content: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "toolCallId")]
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "isError")]
+    pub is_error: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,18 +303,21 @@ pub enum AssistantMessageEvent {
 
 pub type AgentToolCall = ToolCall;
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolResult {
-    pub content: Vec<TextContent>,
+    pub content: Vec<ToolResultContent>,
     pub details: Value,
     pub usage: Option<Usage>,
     pub added_tool_names: Option<Vec<String>>,
     pub terminate: bool,
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 #[async_trait]
 pub trait AgentTool: Send + Sync {
     fn name(&self) -> &str;
+    fn description(&self) -> &str;
     fn parameters_schema(&self) -> &Value;
     fn execution_mode(&self) -> Option<ToolExecutionMode> {
         None
@@ -306,7 +350,7 @@ pub struct BeforeToolCallResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct AfterToolCallResult {
-    pub content: Option<Vec<TextContent>>,
+    pub content: Option<Vec<ToolResultContent>>,
     pub details: Option<Value>,
     pub is_error: Option<bool>,
     pub usage: Option<Usage>,
@@ -456,7 +500,9 @@ pub enum AgentEvent {
     },
     ToolExecutionUpdate {
         tool_call_id: String,
+        #[allow(dead_code)]
         tool_name: String,
+        #[allow(dead_code)]
         args: Value,
         partial_result: AgentToolResult,
     },
@@ -520,18 +566,24 @@ pub fn identity_convert(messages: Vec<AgentMessage>) -> Vec<LlmMessage> {
                 role: user.role,
                 content: Some(user.content),
                 tool_call_id: None,
+                is_error: None,
             }),
             AgentMessage::Assistant(assistant) => Some(LlmMessage {
                 role: assistant.role,
                 content: Some(Value::String(format!("{:?}", assistant.content))),
                 tool_call_id: None,
+                is_error: None,
             }),
             AgentMessage::ToolResult(tool) => Some(LlmMessage {
                 role: tool.role,
                 content: Some(Value::Array(
-                    tool.content.iter().map(|part| serde_json::to_value(part).unwrap_or(Value::Null)).collect(),
+                    tool.content
+                        .iter()
+                        .filter_map(|part| serde_json::to_value(part).ok())
+                        .collect(),
                 )),
                 tool_call_id: Some(tool.tool_call_id),
+                is_error: Some(tool.is_error),
             }),
         })
         .collect()

@@ -40,7 +40,6 @@ pub fn snapshot_safe_json(value: &Value) -> Result<Value, CatalogError> {
     }
 }
 
-#[cfg(test)]
 pub fn assert_json_value(value: &Value) -> Result<(), CatalogError> {
     snapshot_safe_json(value).map(|_| ())
 }

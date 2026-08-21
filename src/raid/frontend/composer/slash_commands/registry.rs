@@ -13,8 +13,8 @@ pub static COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "model",
-        description: "<provider/model> - Select model (opens selector UI)",
-        argument: Some("<provider/model>"),
+        description: "Select a model (interactive fuzzy search)",
+        argument: None,
     },
     SlashCommand {
         name: "scoped-models",

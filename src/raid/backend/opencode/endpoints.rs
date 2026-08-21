@@ -28,13 +28,12 @@ pub struct PlanEndpoints {
     pub models_url: &'static str,
 }
 
+pub const METADATA_URL: &str = "https://models.opencode.ai/api.json";
+pub const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[cfg(test)]
 use super::types::{OpenCodeProtocol, SdkPackage};
 
-#[cfg(test)]
-pub const METADATA_URL: &str = "https://models.opencode.ai/api.json";
-#[cfg(test)]
-pub const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(test)]
 pub const PLAN_IDS: [OpenCodePlan; 2] = [OpenCodePlan::Zen, OpenCodePlan::Go];
 

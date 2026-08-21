@@ -285,10 +285,10 @@ fn tab_completes_the_selected_command_name() {
 #[test]
 fn tab_adds_a_space_when_the_command_takes_an_argument() {
     let mut composer = ComposerState::default();
-    composer.insert_paste("/mod");
+    composer.insert_paste("/exp");
     composer.handle_key(key(KeyCode::Tab));
 
-    assert_eq!(composer.text, "/model ");
+    assert_eq!(composer.text, "/export ");
 }
 
 #[test]

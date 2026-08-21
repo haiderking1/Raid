@@ -48,6 +48,14 @@ impl ViewportState {
         }
     }
 
+    pub fn update_tool(&mut self, index: usize, summary: impl Into<String>) {
+        if let Some(TimelineItem::Tool(call)) = self.items.get_mut(index) {
+            if call.status == ToolStatus::Running {
+                call.summary = summary.into();
+            }
+        }
+    }
+
     pub fn update_assistant(&mut self, index: usize, body: String) {
         if let Some(TimelineItem::Message {
             role: Role::Assistant,
