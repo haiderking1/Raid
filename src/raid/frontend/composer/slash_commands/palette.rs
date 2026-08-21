@@ -1,5 +1,5 @@
 use super::registry::SlashCommand;
-use crate::frontend::composer::clip::render_clipped;
+use crate::frontend::clip::render_clipped;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,

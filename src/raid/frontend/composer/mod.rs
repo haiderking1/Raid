@@ -1,5 +1,4 @@
 mod action;
-mod clip;
 mod dock;
 mod state;
 mod widget;

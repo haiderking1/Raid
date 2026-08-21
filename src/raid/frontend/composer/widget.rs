@@ -1,6 +1,6 @@
-use super::clip::render_clipped;
 use super::state::ComposerState;
 use super::wrap::ComposerLayout;
+use crate::frontend::clip::render_clipped;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
