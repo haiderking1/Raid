@@ -94,7 +94,12 @@ impl AgentSession {
             self.cancel.clone(),
             self.stream_fn.clone(),
         );
-        self.handle = Some(handle);
+        let AgentLoopHandle { events, result } = handle;
+        let task = self.runtime.spawn(result);
+        self.handle = Some(AgentLoopHandle {
+            events,
+            result: Box::pin(async move { task.await.expect("agent loop driver task") }),
+        });
     }
 
     pub fn poll(&mut self, chat: &mut ViewportState) {
@@ -318,6 +323,28 @@ mod tests {
         let mut session = AgentSession::new(rt.handle().clone()).with_stream_fn(test_stream_fn());
         session.submit("hello".into());
         session.drive_to_completion(&mut chat);
+        assert_eq!(chat.last_role(), Some(Role::Assistant));
+    }
+
+    #[test]
+    fn session_poll_receives_reply_without_awaiting_result() {
+        use std::time::{Duration, Instant};
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut chat = ViewportState::default();
+        let mut session = AgentSession::new(rt.handle().clone()).with_stream_fn(test_stream_fn());
+        session.submit("hello".into());
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while session.is_running() && Instant::now() < deadline {
+            session.poll(&mut chat);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(!session.is_running());
         assert_eq!(chat.last_role(), Some(Role::Assistant));
     }
 }

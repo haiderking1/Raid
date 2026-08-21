@@ -93,6 +93,11 @@ impl ViewportState {
         })
     }
 
+    #[cfg(test)]
+    pub fn scroll_from_bottom(&self) -> usize {
+        self.scroll_from_bottom
+    }
+
     pub fn scroll_up(&mut self, page: usize, content_height: usize, view_height: usize) {
         let max_scroll = content_height.saturating_sub(view_height.max(1));
         self.scroll_from_bottom = (self.scroll_from_bottom + page.max(1)).min(max_scroll);

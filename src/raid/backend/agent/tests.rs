@@ -220,6 +220,54 @@ async fn emits_agent_message_events() {
 }
 
 #[tokio::test]
+async fn exposes_stream_errors_after_an_empty_assistant_start() {
+    let stream_fn: StreamFn = Arc::new(|_model, _context, _options, _cancel| {
+        Box::pin(async {
+            let stream = assistant_message_stream();
+            let partial = assistant_message(Vec::new(), StopReason::Pending);
+            let error = assistant_message(
+                vec![AssistantContent::Text(TextContent::new(
+                    "provider rejected the selected model",
+                ))],
+                StopReason::Error,
+            );
+            stream.push(AssistantMessageEvent::Start { partial });
+            stream.push(AssistantMessageEvent::Error {
+                reason: StopReason::Error,
+                error: error.clone(),
+            });
+            stream.end(Some(error));
+            stream
+        })
+    });
+    let context = AgentContext {
+        system_prompt: String::new(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let handle = agent_loop(
+        vec![AgentMessage::User(UserMessage::new("hello"))],
+        context,
+        identity_config(),
+        CancellationToken::new(),
+        Some(stream_fn),
+    );
+
+    let (events, _) = collect_loop(handle).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::MessageUpdate {
+            message: AgentMessage::Assistant(message),
+            ..
+        } if message.content.iter().any(|content| matches!(
+            content,
+            AssistantContent::Text(text)
+                if text.text == "provider rejected the selected model"
+        ))
+    )));
+}
+
+#[tokio::test]
 async fn executes_tool_calls_and_emits_tool_events() {
     let executed = Arc::new(Mutex::new(Vec::new()));
     let tool = Arc::new(EchoTool {

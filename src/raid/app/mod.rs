@@ -12,7 +12,7 @@ use crate::frontend::model::{model_input_wrap_width, model_palette_height, Model
 use crate::frontend::tools::ToolStatus;
 use agent::AgentSession;
 use connect::{ConnectAction, ConnectFlow};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use layout::shell_layout;
 use model::{ModelAction, ModelFlow};
 use ratatui::{Frame, layout::Rect};
@@ -28,6 +28,8 @@ pub struct App {
     model: ModelFlow,
     runtime: tokio::runtime::Handle,
 }
+
+const MOUSE_SCROLL_LINES: usize = 3;
 
 impl App {
     pub fn new(runtime: tokio::runtime::Handle) -> Self {
@@ -170,6 +172,28 @@ impl App {
         self.composer.insert_paste(pasted);
     }
 
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.connect.active()
+            || self.model.active()
+            || mouse.column as usize >= self.last_chat_width
+            || mouse.row as usize >= self.last_chat_height
+        {
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                let width = self.last_chat_width.max(1);
+                let view = self.last_chat_height.max(1);
+                let height = self.chat.content_height(&mut self.cache, width);
+                self.chat
+                    .scroll_up(MOUSE_SCROLL_LINES, height, view);
+            }
+            MouseEventKind::ScrollDown => self.chat.scroll_down(MOUSE_SCROLL_LINES),
+            _ => {}
+        }
+    }
+
     pub fn tick(&mut self) {
         self.model.poll(&self.runtime);
         self.agent.poll(&mut self.chat);
@@ -307,7 +331,9 @@ mod tests {
     use super::{App, AppAction};
     use crate::app::agent::test_stream_fn;
     use crate::frontend::chat::Role;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+    };
     use ratatui::{Terminal, backend::TestBackend};
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -319,6 +345,15 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     #[test]
@@ -388,5 +423,21 @@ mod tests {
         }
         assert!(screen.contains("mock reply") || screen.contains("hi"));
         assert!(screen.contains('>'));
+    }
+
+    #[test]
+    fn mouse_wheel_moves_three_rows_per_event() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
+        app.last_chat_width = 30;
+        app.last_chat_height = 4;
+        for index in 0..8 {
+            app.chat.push(Role::User, format!("message {index}"));
+        }
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp));
+        assert_eq!(app.chat.scroll_from_bottom(), 3);
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown));
+        assert_eq!(app.chat.scroll_from_bottom(), 0);
     }
 }

@@ -3,20 +3,26 @@ mod backend;
 mod config;
 mod frontend;
 
-use std::{io::stdout, time::Duration};
+use std::{
+    io::stdout,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use app::{App, AppAction};
 use crossterm::{
     cursor::Show,
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
 };
 use ratatui::DefaultTerminal;
 use tracing_subscriber::EnvFilter;
+
+const FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_333);
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -33,6 +39,7 @@ fn main() -> Result<()> {
     let result = match execute!(
         stdout(),
         EnableBracketedPaste,
+        EnableMouseCapture,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
     ) {
         Ok(()) => run(&mut terminal),
@@ -42,6 +49,7 @@ fn main() -> Result<()> {
     let cleanup = execute!(
         stdout(),
         DisableBracketedPaste,
+        DisableMouseCapture,
         PopKeyboardEnhancementFlags,
         Show
     );
@@ -54,19 +62,26 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
     let mut app = App::new(runtime);
     let mut content_width = 0;
 
-    loop {
+    'app: loop {
+        let frame_started = Instant::now();
         app.tick();
         terminal.draw(|frame| {
             content_width = app.draw(frame);
         })?;
-        if event::poll(Duration::from_millis(50))? {
+
+        loop {
+            let remaining = FRAME_INTERVAL.saturating_sub(frame_started.elapsed());
+            if remaining.is_zero() || !event::poll(remaining)? {
+                break;
+            }
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     if app.handle_key(key, content_width) == AppAction::Quit {
-                        break;
+                        break 'app;
                     }
                 }
                 Event::Paste(pasted) => app.insert_paste(&pasted),
+                Event::Mouse(mouse) => app.handle_mouse(mouse),
                 _ => {}
             }
         }

@@ -392,7 +392,7 @@ async fn stream_assistant_response(
                     .await;
                 }
             }
-            AssistantMessageEvent::Done { message, .. } | AssistantMessageEvent::Error { error: message, .. } => {
+            AssistantMessageEvent::Done { message, .. } => {
                 if added_partial {
                     if let Some(last) = context.messages.last_mut() {
                         *last = AgentMessage::Assistant(message.clone());
@@ -401,6 +401,33 @@ async fn stream_assistant_response(
                     context.messages.push(AgentMessage::Assistant(message.clone()));
                 }
                 if !added_partial {
+                    emit(AgentEvent::MessageStart {
+                        message: AgentMessage::Assistant(message.clone()),
+                    })
+                    .await;
+                }
+                emit(AgentEvent::MessageEnd {
+                    message: AgentMessage::Assistant(message.clone()),
+                })
+                .await;
+                return message;
+            }
+            AssistantMessageEvent::Error { reason, error } => {
+                let message = error;
+                if added_partial {
+                    if let Some(last) = context.messages.last_mut() {
+                        *last = AgentMessage::Assistant(message.clone());
+                    }
+                    emit(AgentEvent::MessageUpdate {
+                        message: AgentMessage::Assistant(message.clone()),
+                        assistant_message_event: AssistantMessageEvent::Error {
+                            reason,
+                            error: message.clone(),
+                        },
+                    })
+                    .await;
+                } else {
+                    context.messages.push(AgentMessage::Assistant(message.clone()));
                     emit(AgentEvent::MessageStart {
                         message: AgentMessage::Assistant(message.clone()),
                     })
