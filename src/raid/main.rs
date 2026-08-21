@@ -16,10 +16,10 @@ use crossterm::{
     execute,
 };
 use ratatui::DefaultTerminal;
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::Margin;
 use tracing_subscriber::EnvFilter;
 
-use frontend::composer::{ComposerAction, ComposerState, ComposerWidget};
+use frontend::composer::{ComposerAction, ComposerState, ComposerWidget, docked_layout};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -64,6 +64,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<()> {
                         ComposerAction::Submit(message) => {
                             tracing::info!(message = %message, "message submitted");
                         }
+                        ComposerAction::Command { name, args } => {
+                            tracing::info!(name = %name, args = %args, "slash command");
+                        }
                         ComposerAction::None => {}
                     }
                 }
@@ -84,17 +87,13 @@ fn draw(frame: &mut ratatui::Frame, composer: &ComposerState) -> usize {
         return 0;
     }
 
-    let content_width = padded.width.saturating_sub(3) as usize;
-    let composer_height = composer.desired_height(content_width, padded.height);
-    let composer_area = Rect {
-        x: padded.x,
-        y: padded.y + padded.height - composer_height,
-        width: padded.width,
-        height: composer_height,
-    };
-    frame.render_widget(ComposerWidget::new(composer), composer_area);
-    if let Some(cursor) = ComposerWidget::cursor_position(composer_area, composer) {
+    let layout = docked_layout(padded, composer);
+    frame.render_widget(ComposerWidget::new(composer), layout.composer);
+    if let (Some(area), Some(widget)) = (layout.palette, composer.palette_widget()) {
+        frame.render_widget(widget, area);
+    }
+    if let Some(cursor) = ComposerWidget::cursor_position(layout.composer, composer) {
         frame.set_cursor_position(cursor);
     }
-    content_width
+    layout.content_width
 }
