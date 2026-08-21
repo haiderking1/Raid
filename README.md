@@ -12,5 +12,5 @@ Terminal coding agent (Rust + Ratatui).
 cargo run
 ```
 
-Type into the composer, press `Shift+Enter` for a newline, `Enter` to submit,
-or press `Esc` to quit.
+Type into the composer, press `Shift+Enter` for a newline, `Enter` to submit.
+`Ctrl+C` clears a draft, and quits if the composer is already empty.

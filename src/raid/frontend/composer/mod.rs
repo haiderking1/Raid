@@ -25,10 +25,6 @@ impl ComposerState {
             return ComposerAction::None;
         }
 
-        if key.code == KeyCode::Esc {
-            return ComposerAction::Quit;
-        }
-
         if key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
@@ -707,11 +703,13 @@ mod tests {
     }
 
     #[test]
-    fn escape_quits_without_submitting_text() {
+    fn escape_does_not_quit_or_change_text() {
         let mut composer = ComposerState::default();
-        composer.handle_key(key(KeyCode::Char('x')));
 
-        assert_eq!(composer.handle_key(key(KeyCode::Esc)), ComposerAction::Quit);
+        assert_eq!(composer.handle_key(key(KeyCode::Esc)), ComposerAction::None);
+
+        composer.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(composer.handle_key(key(KeyCode::Esc)), ComposerAction::None);
         assert_eq!(composer.text, "x");
     }
 
