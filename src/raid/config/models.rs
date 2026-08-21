@@ -31,12 +31,18 @@ pub fn connected_provider() -> Result<&'static ConnectProvider, String> {
 pub fn load_connected_catalog_from_disk(
 ) -> Result<(OpenCodeCatalog, &'static ConnectProvider), String> {
     let provider = connected_provider()?;
+    let catalog = load_provider_catalog_from_disk(provider.id)?;
+    Ok((catalog, provider))
+}
+
+pub fn load_provider_catalog_from_disk(provider_id: &str) -> Result<OpenCodeCatalog, String> {
+    let provider = provider_by_id(provider_id)
+        .ok_or_else(|| format!("Unknown provider '{provider_id}'."))?;
     let cache = file_cache();
-    let catalog = cache
+    cache
         .read(provider.plan)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "No cached model catalog yet.".to_string())?;
-    Ok((catalog, provider))
+        .ok_or_else(|| "No cached model catalog yet.".to_string())
 }
 
 pub fn refresh_connected_catalog(runtime: &Handle) -> Result<OpenCodeCatalog, String> {
@@ -77,6 +83,18 @@ pub fn save_default_model(model_id: &str, api: &str) -> Result<(), String> {
     let mut settings = RaidSettings::load();
     settings.default_model = Some(model_id.to_string());
     settings.default_api = Some(api.to_string());
+    settings.save()
+}
+
+pub fn save_text_generation_model(
+    provider_id: &str,
+    model_id: &str,
+    api: &str,
+) -> Result<(), String> {
+    let mut settings = RaidSettings::load();
+    settings.text_generation_provider = Some(provider_id.to_string());
+    settings.text_generation_model = Some(model_id.to_string());
+    settings.text_generation_api = Some(api.to_string());
     settings.save()
 }
 

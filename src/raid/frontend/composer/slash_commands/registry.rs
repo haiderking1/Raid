@@ -17,6 +17,11 @@ pub static COMMANDS: &[SlashCommand] = &[
         argument: None,
     },
     SlashCommand {
+        name: "text-model",
+        description: "Select the text generation model",
+        argument: None,
+    },
+    SlashCommand {
         name: "new",
         description: "Start a new session",
         argument: None,

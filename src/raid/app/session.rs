@@ -47,16 +47,17 @@ impl SessionFlow {
         &self.status
     }
 
+    pub fn current(&self) -> Option<&Path> {
+        self.current.as_deref()
+    }
+
     pub fn start(&mut self, sessions: Vec<SessionSummary>, current: Option<&Path>) {
-        let current = current.map(Path::to_path_buf);
         self.active = true;
-        self.sessions = sessions
-            .into_iter()
-            .filter(|session| Some(&session.path) != current.as_ref())
-            .collect();
+        self.sessions = sessions;
         self.filtered = (0..self.sessions.len()).collect();
         self.selected = 0;
         self.delete_armed = None;
+        self.current = current.map(Path::to_path_buf);
         self.status = if self.sessions.is_empty() {
             "No saved sessions for this project.".into()
         } else {
@@ -170,6 +171,9 @@ impl SessionFlow {
         let Some(session) = self.sessions.get(index) else {
             return SessionAction::None;
         };
+        if self.current.as_deref() == Some(session.path.as_path()) {
+            return self.cancel();
+        }
         if session.locked {
             self.status = "That session is open in another Raid process.".into();
             return SessionAction::None;
@@ -185,6 +189,10 @@ impl SessionFlow {
         let Some(session) = self.sessions.get(index) else {
             return SessionAction::None;
         };
+        if self.current.as_deref() == Some(session.path.as_path()) {
+            self.status = "Start a new session before deleting the current one.".into();
+            return SessionAction::None;
+        }
         if session.locked {
             self.status = "Close the other Raid process before deleting this session.".into();
             return SessionAction::None;
@@ -275,6 +283,40 @@ mod tests {
             40,
         );
         assert_eq!(action, SessionAction::Selected(PathBuf::from("/Repair.db")));
+    }
+
+    #[test]
+    fn current_session_stays_visible_and_enter_closes_the_picker() {
+        let mut flow = SessionFlow::default();
+        let current = PathBuf::from("/Current.db");
+        flow.start(vec![summary("Current", "alpha", true)], Some(&current));
+
+        assert_eq!(flow.sessions().len(), 1);
+        assert_eq!(flow.current(), Some(current.as_path()));
+        let action = flow.handle_key(
+            &mut ComposerState::default(),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            40,
+        );
+
+        assert_eq!(action, SessionAction::Cancelled);
+        assert!(!flow.active());
+    }
+
+    #[test]
+    fn current_session_cannot_be_deleted() {
+        let mut flow = SessionFlow::default();
+        let current = PathBuf::from("/Current.db");
+        flow.start(vec![summary("Current", "alpha", true)], Some(&current));
+
+        let action = flow.handle_key(
+            &mut ComposerState::default(),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            40,
+        );
+
+        assert_eq!(action, SessionAction::None);
+        assert!(flow.status().contains("current one"));
     }
 
     #[test]

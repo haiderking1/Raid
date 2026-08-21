@@ -16,9 +16,11 @@ use crate::backend::agent::{
 use crate::backend::session::{
     most_recent_session, CompactionRecord, SessionStore, SessionSummary,
 };
+use crate::backend::opencode::types::ReasoningVariant;
 use crate::backend::tools::{default_tools, ToolEnvironment};
 use crate::config::{
-    load_connected_catalog_from_disk, resolve_api_key, sessions_dir, RaidSettings,
+    load_connected_catalog_from_disk, load_provider_catalog_from_disk, resolve_api_key,
+    sessions_dir, RaidSettings,
 };
 use crate::frontend::chat::{Role, ViewportState};
 use crate::frontend::tools::ToolStatus;
@@ -37,7 +39,7 @@ pub struct AgentSession {
     session_root: Option<PathBuf>,
     store: Option<SessionStore>,
     persisted_messages: HashSet<String>,
-    title_task: Option<JoinHandle<Option<String>>>,
+    title_task: Option<JoinHandle<Result<String, String>>>,
     compaction_task: Option<JoinHandle<Result<CompactionOutcome, String>>>,
     pending_submit: Option<String>,
 }
@@ -328,8 +330,9 @@ impl AgentSession {
             .stream_fn
             .clone()
             .unwrap_or_else(get_default_stream_fn);
-        let model = self.config.model.clone();
-        let api_key = self.config.api_key.clone();
+        let settings = RaidSettings::load();
+        let model = text_generation_model(&settings);
+        let api_key = resolve_api_key(&model.provider);
         let message = first_message.chars().take(8_000).collect::<String>();
         self.title_task = Some(self.runtime.spawn(generate_session_title(
             stream_fn,
@@ -337,6 +340,36 @@ impl AgentSession {
             api_key,
             message,
         )));
+    }
+
+    pub fn retry_session_title(&mut self) {
+        let first_message = {
+            let Some(store) = &self.store else {
+                return;
+            };
+            match store.current_title_is_replaceable() {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    tracing::warn!(%error, path = %store.path().display(), "session title check failed");
+                    return;
+                }
+            }
+            match store.snapshot() {
+                Ok(snapshot) => first_user_text(&snapshot.active_messages),
+                Err(error) => {
+                    tracing::warn!(%error, path = %store.path().display(), "session title retry read failed");
+                    return;
+                }
+            }
+        };
+        let Some(first_message) = first_message else {
+            return;
+        };
+        if let Some(task) = self.title_task.take() {
+            task.abort();
+        }
+        self.spawn_title_generation(&first_message);
     }
 
     fn poll_title(&mut self) {
@@ -347,8 +380,16 @@ impl AgentSession {
             return;
         }
         let task = self.title_task.take().expect("checked title task");
-        let Ok(Some(title)) = self.runtime.block_on(task) else {
-            return;
+        let title = match self.runtime.block_on(task) {
+            Ok(Ok(title)) => title,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "session title generation failed");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "session title task failed");
+                return;
+            }
         };
         let Some(store) = &mut self.store else {
             return;
@@ -492,6 +533,7 @@ impl AgentSession {
             .collect();
         hydrate_chat(chat, &snapshot.active_messages);
         self.store = Some(store);
+        self.retry_session_title();
         Ok(())
     }
 
@@ -553,25 +595,12 @@ impl AgentSession {
     }
 }
 
-const SESSION_TITLE_PROMPT: &str = r#"Generate a title that will help the user recognize this coding session later.
-Return JSON with exactly one key: title.
-
-Before answering, silently reduce the request to:
-- Subject: What system, feature, or problem is this really about?
-- Outcome: What does the user ultimately want to understand or change?
-- Incidental instructions: What only describes how the work should be done?
-
-Title the subject and outcome. Discard incidental instructions.
-
-Editorial rules:
-- Use 3 to 8 words and fewer than 40 characters.
-- Use a compact noun phrase or clear action phrase.
-- Capture the umbrella goal when the request lists several symptoms or steps.
-- Name the product change, not the plan, report, branch, or commit used to produce it.
-- Do not mention models, tools, output formats, or tests unless they are the subject.
-- Do not claim the work is complete.
-- Do not copy and truncate the user's message.
-- Avoid project names already visible in the UI, quotes, labels, filler, and trailing punctuation."#;
+const SESSION_TITLE_PROMPT: &str = r#"Name this coding session from only the user's first message.
+Return one JSON object with exactly one key: {"title":"..."}.
+Use 3 to 8 words and fewer than 40 characters.
+Summarize the main subject and desired outcome. Ignore instructions about how to do the work.
+Do not mention models, tools, tests, or completion unless they are the subject.
+Do not copy and truncate the message. Avoid filler and trailing punctuation."#;
 const COMPACTION_PROMPT: &str = "Summarize the older part of this coding session so another model can continue the work without reading it. Preserve the user's durable goal, decisions, constraints, errors, unfinished work, exact file paths, commands, test results, and files read or changed. Drop repeated discussion and obsolete attempts. Return only the summary in plain text.";
 
 struct CompactionOutcome {
@@ -584,7 +613,8 @@ async fn generate_session_title(
     model: Model,
     api_key: Option<String>,
     first_message: String,
-) -> Option<String> {
+) -> Result<String, String> {
+    let provider_options = title_provider_options(&model.provider, &model.id);
     let prompt = format!("{SESSION_TITLE_PROMPT}\n\nUser message:\n{first_message}");
     let context = LlmContext {
         system_prompt: None,
@@ -601,7 +631,8 @@ async fn generate_session_title(
         context,
         StreamOptions {
             api_key,
-            max_output_tokens: Some(80),
+            max_output_tokens: None,
+            provider_options,
         },
         CancellationToken::new(),
     )
@@ -609,17 +640,73 @@ async fn generate_session_title(
     let mut events = stream.into_stream();
     while let Some(event) = events.next().await {
         match event {
-            AssistantMessageEvent::Done { message, reason }
-                if !matches!(reason, StopReason::Error | StopReason::Aborted) =>
-            {
+            AssistantMessageEvent::Done { message, reason } => {
                 let text = assistant_text(&message);
-                return parse_generated_title(&text);
+                if let Some(title) = parse_generated_title(&text) {
+                    return Ok(title);
+                }
+                return Err(if reason == StopReason::Length && text.trim().is_empty() {
+                    "The model stopped before returning title JSON.".into()
+                } else {
+                    format!("The model returned invalid title JSON with stop reason {reason:?}.")
+                });
             }
-            AssistantMessageEvent::Error { .. } => return None,
+            AssistantMessageEvent::Error { reason, error } => {
+                return Err(error
+                    .error_message
+                    .unwrap_or_else(|| format!("The title request failed with stop reason {reason:?}.")));
+            }
             _ => {}
         }
     }
-    None
+    Err("The title response stream ended before returning a title.".into())
+}
+
+fn text_generation_model(settings: &RaidSettings) -> Model {
+    let model_id = settings.text_generation_model_id().to_string();
+    Model {
+        id: model_id.clone(),
+        name: model_id,
+        api: settings.text_generation_api().into(),
+        provider: settings.text_generation_provider_id().to_string(),
+    }
+}
+
+fn title_provider_options(provider_id: &str, model_id: &str) -> Option<Value> {
+    let catalog = load_provider_catalog_from_disk(provider_id).ok()?;
+    let model = catalog.models.iter().find(|model| model.id == model_id)?;
+    if !model.reasoning {
+        return None;
+    }
+    let variant = lowest_title_reasoning_variant(&model.reasoning_variants)?;
+    serde_json::to_value(&variant.provider_options).ok()
+}
+
+fn lowest_title_reasoning_variant(variants: &[ReasoningVariant]) -> Option<&ReasoningVariant> {
+    variants
+        .iter()
+        .min_by_key(|variant| title_reasoning_rank(&variant.id, &variant.label))
+}
+
+fn title_reasoning_rank(id: &str, label: &str) -> usize {
+    let id = id.to_ascii_lowercase();
+    let label = label.to_ascii_lowercase();
+    if id == "toggle:disabled"
+        || id == "effort:none"
+        || matches!(label.as_str(), "off" | "none" | "disabled")
+    {
+        return 0;
+    }
+    match label.as_str() {
+        "minimal" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        "xhigh" => 5,
+        "max" => 6,
+        "default" => usize::MAX,
+        _ => 100,
+    }
 }
 
 async fn generate_compaction(
@@ -662,6 +749,7 @@ async fn generate_compaction(
         StreamOptions {
             api_key,
             max_output_tokens: Some(4_096),
+            provider_options: None,
         },
         CancellationToken::new(),
     )
@@ -721,6 +809,13 @@ fn estimate_message_tokens(messages: &[AgentMessage]) -> u64 {
         .iter()
         .map(estimate_one_message_tokens)
         .sum()
+}
+
+fn first_user_text(messages: &[AgentMessage]) -> Option<String> {
+    messages.iter().find_map(|message| match message {
+        AgentMessage::User(user) => user.content.as_str().map(str::to_string),
+        _ => None,
+    })
 }
 
 fn estimate_one_message_tokens(message: &AgentMessage) -> u64 {
@@ -936,12 +1031,17 @@ pub fn test_stream_fn() -> StreamFn {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_generated_title, test_stream_fn, AgentSession};
+    use super::{
+        lowest_title_reasoning_variant, parse_generated_title, test_stream_fn,
+        text_generation_model, AgentSession,
+    };
     use crate::backend::agent::{
         assistant_message, assistant_message_stream, AssistantContent, AssistantMessageEvent,
         StopReason, StreamFn, TextContent,
     };
     use crate::frontend::chat::{Role, ViewportState};
+    use crate::backend::opencode::types::{ProviderOptions, ReasoningVariant, ReasoningVariantKind};
+    use crate::config::RaidSettings;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -1060,22 +1160,72 @@ mod tests {
     }
 
     #[test]
+    fn title_requests_prefer_disabled_then_low_reasoning() {
+        let variant = |id: &str, label: &str| ReasoningVariant {
+            id: id.into(),
+            label: label.into(),
+            kind: ReasoningVariantKind::Effort,
+            provider_options: ProviderOptions::default(),
+        };
+        let variants = vec![
+            variant("effort:high", "high"),
+            variant("effort:low", "low"),
+            variant("effort:none", "none"),
+        ];
+        assert_eq!(
+            lowest_title_reasoning_variant(&variants).map(|variant| variant.id.as_str()),
+            Some("effort:none")
+        );
+
+        let variants = vec![
+            variant("effort:max", "max"),
+            variant("effort:low", "low"),
+            variant("effort:high", "high"),
+        ];
+        assert_eq!(
+            lowest_title_reasoning_variant(&variants).map(|variant| variant.id.as_str()),
+            Some("effort:low")
+        );
+    }
+
+    #[test]
+    fn titles_use_the_independent_text_generation_model() {
+        let settings: RaidSettings = serde_json::from_str(
+            r#"{
+                "default_provider":"chat-provider",
+                "default_model":"chat-model",
+                "default_api":"responses",
+                "text_generation_provider":"text-provider",
+                "text_generation_model":"text-model",
+                "text_generation_api":"openai-compatible"
+            }"#,
+        )
+        .expect("settings");
+
+        let model = text_generation_model(&settings);
+        assert_eq!(model.provider, "text-provider");
+        assert_eq!(model.id, "text-model");
+        assert_eq!(model.api, "openai-compatible");
+    }
+
+    #[test]
     fn generated_title_renames_the_active_database() {
         let root = TestDir::new();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("runtime");
-        let stream_fn: StreamFn = Arc::new(|_model, context, _options, _cancel| {
+        let stream_fn: StreamFn = Arc::new(|_model, context, options, _cancel| {
             Box::pin(async move {
                 assert_eq!(context.system_prompt, None);
                 assert_eq!(context.messages.len(), 1);
+                assert_eq!(options.max_output_tokens, None);
                 let prompt = context.messages[0]
                     .content
                     .as_ref()
                     .and_then(|value| value.as_str())
                     .expect("title prompt");
-                assert!(prompt.contains("Return JSON with exactly one key: title."));
+                assert!(prompt.contains("Return one JSON object with exactly one key:"));
                 assert!(prompt.ends_with(
                     "User message:\nplease repair all the broken session storage paths"
                 ));
@@ -1147,7 +1297,9 @@ mod tests {
             .enable_all()
             .build()
             .expect("runtime");
-        let mut session = AgentSession::new(rt.handle().clone()).with_session_root(root.0.clone());
+        let mut session = AgentSession::new(rt.handle().clone())
+            .with_stream_fn(test_stream_fn())
+            .with_session_root(root.0.clone());
         let mut chat = ViewportState::default();
         session.open_session(path, &mut chat).expect("open session");
         assert_eq!(session.context.messages.len(), 2);

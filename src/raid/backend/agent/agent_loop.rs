@@ -354,6 +354,7 @@ async fn stream_assistant_response(
         super::types::StreamOptions {
             api_key,
             max_output_tokens: None,
+            provider_options: None,
         },
         cancel.clone(),
     )

@@ -6,7 +6,8 @@ use tokio::task::JoinHandle;
 use crate::backend::opencode::ResolvedModel;
 use crate::config::{
     connected_provider, filter_model_indices, load_connected_catalog_from_disk,
-    refresh_connected_catalog, refresh_connected_catalog_async, save_default_model, RaidSettings,
+    refresh_connected_catalog, refresh_connected_catalog_async, save_default_model,
+    save_text_generation_model, RaidSettings,
 };
 use crate::frontend::composer::{ComposerAction, ComposerState};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -15,8 +16,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 pub enum ModelAction {
     None,
     Cancelled,
-    Selected,
+    Selected { target: ModelTarget },
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTarget {
+    Chat,
+    TextGeneration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +36,7 @@ enum LoadState {
 #[derive(Debug)]
 pub struct ModelFlow {
     active: bool,
+    target: ModelTarget,
     models: Arc<Vec<ResolvedModel>>,
     filtered: Vec<usize>,
     selected: usize,
@@ -43,6 +51,7 @@ impl Default for ModelFlow {
     fn default() -> Self {
         Self {
             active: false,
+            target: ModelTarget::Chat,
             models: Arc::new(Vec::new()),
             filtered: Vec::new(),
             selected: 0,
@@ -76,10 +85,16 @@ impl ModelFlow {
         self.selected
     }
 
-    pub fn start(&mut self, runtime: &Handle) {
+    pub fn start(&mut self, runtime: &Handle, target: ModelTarget) {
         *self = Self::default();
         self.active = true;
-        self.current_model_id = RaidSettings::load().model_id().to_string();
+        self.target = target;
+        let settings = RaidSettings::load();
+        self.current_model_id = match target {
+            ModelTarget::Chat => settings.model_id(),
+            ModelTarget::TextGeneration => settings.text_generation_model_id(),
+        }
+        .to_string();
 
         match connected_provider() {
             Ok(provider) => {
@@ -211,10 +226,20 @@ impl ModelFlow {
         let Some(model) = self.models.get(model_index) else {
             return ModelAction::None;
         };
-        match save_default_model(&model.id, model.protocol.api_name()) {
+        let result = match self.target {
+            ModelTarget::Chat => save_default_model(&model.id, model.protocol.api_name()),
+            ModelTarget::TextGeneration => save_text_generation_model(
+                &model.metadata_provider_id,
+                &model.id,
+                model.protocol.api_name(),
+            ),
+        };
+        match result {
             Ok(()) => {
                 self.active = false;
-                ModelAction::Selected
+                ModelAction::Selected {
+                    target: self.target,
+                }
             }
             Err(error) => ModelAction::Error { message: error },
         }
@@ -284,6 +309,7 @@ impl ModelFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_env_lock;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -294,6 +320,7 @@ mod tests {
     fn typing_filters_models_without_leaving_picker() {
         let mut flow = ModelFlow {
             active: true,
+            target: ModelTarget::Chat,
             models: Arc::new(vec![
                 make_model("glm-5.2", "GLM-5.2"),
                 make_model("gpt-5.6-luna", "GPT-5.6 Luna"),
@@ -321,6 +348,7 @@ mod tests {
             .collect();
         let mut flow = ModelFlow {
             active: true,
+            target: ModelTarget::Chat,
             models: Arc::new(models),
             filtered: vec![0, 1, 2, 3, 4],
             selected: 0,
@@ -343,6 +371,7 @@ mod tests {
     fn refresh_preserves_filter_and_selected_model() {
         let mut flow = ModelFlow {
             active: true,
+            target: ModelTarget::Chat,
             models: Arc::new(vec![
                 make_model("alpha", "Alpha"),
                 make_model("beta", "Beta"),
@@ -371,6 +400,52 @@ mod tests {
         assert_eq!(flow.models()[flow.filtered()[0]].id, "beta");
         assert_eq!(flow.models()[flow.filtered()[0]].name, "Beta Next");
         assert_eq!(flow.selected(), 0);
+    }
+
+    #[test]
+    fn text_generation_selection_does_not_change_the_chat_model() {
+        let _guard = test_env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "raid-text-model-flow-test-{}",
+            std::process::id()
+        ));
+        unsafe {
+            std::env::set_var("RAID_AGENT_DIR", &dir);
+        }
+        let mut settings = RaidSettings::default();
+        settings.default_provider = Some("opencode-go".into());
+        settings.default_model = Some("chat-model".into());
+        settings.save().expect("save settings");
+
+        let mut flow = ModelFlow {
+            active: true,
+            target: ModelTarget::TextGeneration,
+            models: Arc::new(vec![make_model("title-model", "Title Model")]),
+            filtered: vec![0],
+            selected: 0,
+            filter_query: String::new(),
+            current_model_id: "chat-model".into(),
+            status: String::new(),
+            load_state: LoadState::Ready,
+            refresh: None,
+        };
+
+        assert_eq!(
+            flow.select_current(),
+            ModelAction::Selected {
+                target: ModelTarget::TextGeneration,
+            }
+        );
+        let saved = RaidSettings::load();
+        assert_eq!(saved.model_id(), "chat-model");
+        assert_eq!(saved.text_generation_provider_id(), "opencode-go");
+        assert_eq!(saved.text_generation_model_id(), "title-model");
+        assert_eq!(saved.text_generation_api(), "openai-compatible");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        unsafe {
+            std::env::remove_var("RAID_AGENT_DIR");
+        }
     }
 
     fn make_model(id: &str, name: &str) -> ResolvedModel {

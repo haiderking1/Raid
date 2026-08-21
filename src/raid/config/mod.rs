@@ -8,7 +8,8 @@ mod settings;
 pub use auth::AuthStore;
 pub use models::{
     connected_provider, filter_model_indices, load_connected_catalog_from_disk,
-    refresh_connected_catalog, refresh_connected_catalog_async, save_default_model,
+    load_provider_catalog_from_disk, refresh_connected_catalog,
+    refresh_connected_catalog_async, save_default_model, save_text_generation_model,
     MAX_VISIBLE_MODELS,
 };
 pub use paths::{catalog_cache_path, sessions_dir, write_private_file};

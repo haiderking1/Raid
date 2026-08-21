@@ -437,6 +437,7 @@ pub struct AgentLoopTurnUpdate {
 pub struct StreamOptions {
     pub api_key: Option<String>,
     pub max_output_tokens: Option<u64>,
+    pub provider_options: Option<Value>,
 }
 
 pub type ConvertToLlmFn =

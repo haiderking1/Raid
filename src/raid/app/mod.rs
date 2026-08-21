@@ -15,7 +15,7 @@ use agent::AgentSession;
 use connect::{ConnectAction, ConnectFlow};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use layout::shell_layout;
-use model::{ModelAction, ModelFlow};
+use model::{ModelAction, ModelFlow, ModelTarget};
 use ratatui::{Frame, layout::Rect};
 use session::{SessionAction, SessionFlow};
 
@@ -156,7 +156,13 @@ impl App {
                             self.composer = ComposerState::default();
                         }
                         "model" => {
-                            self.model.start(&self.runtime);
+                            self.model.start(&self.runtime, ModelTarget::Chat);
+                            self.composer = ComposerState::default();
+                            self.model.apply_filter(self.composer.text());
+                        }
+                        "text-model" => {
+                            self.model
+                                .start(&self.runtime, ModelTarget::TextGeneration);
                             self.composer = ComposerState::default();
                             self.model.apply_filter(self.composer.text());
                         }
@@ -203,8 +209,12 @@ impl App {
                 self.composer = ComposerState::default();
                 AppAction::None
             }
-            ModelAction::Selected => {
-                self.agent.reload_credentials();
+            ModelAction::Selected { target } => {
+                if target == ModelTarget::Chat {
+                    self.agent.reload_credentials();
+                } else {
+                    self.agent.retry_session_title();
+                }
                 self.composer = ComposerState::default();
                 AppAction::None
             }
@@ -298,8 +308,15 @@ impl App {
 
     pub fn tick(&mut self) {
         self.model.poll(&self.runtime);
-        self.session.poll(&self.runtime);
         self.agent.poll(&mut self.chat);
+        if self.session.active() {
+            let current = self.agent.current_session_path().map(|path| path.to_path_buf());
+            if self.session.current() != current.as_deref() {
+                self.session
+                    .start_loading(self.agent.scan_sessions(), current.as_deref());
+            }
+        }
+        self.session.poll(&self.runtime);
     }
 
     pub fn draw(&mut self, frame: &mut Frame) -> usize {
@@ -448,6 +465,7 @@ impl App {
                 self.session.filtered(),
                 self.session.selected(),
                 self.session.status(),
+                self.session.current(),
             ),
             palette,
         );
@@ -525,6 +543,16 @@ mod tests {
         let rt = runtime();
         let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
         app.insert_paste("/model");
+        assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
+        assert!(app.model_active());
+        assert_eq!(app.chat.last_role(), None);
+    }
+
+    #[test]
+    fn text_model_command_opens_interactive_picker() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
+        app.insert_paste("/text-model");
         assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
         assert!(app.model_active());
         assert_eq!(app.chat.last_role(), None);

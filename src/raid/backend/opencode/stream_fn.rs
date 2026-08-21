@@ -96,7 +96,19 @@ async fn run_live_stream(
     };
     validate_language_model(&api_key, &identity)?;
 
-    let request = llm_context_to_model_request(&llm_context, ProviderOptions::default())?;
+    let provider_options = options
+        .provider_options
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| {
+            TransportError::new(
+                "invalid-provider-options",
+                format!("Provider options are invalid: {error}"),
+                false,
+            )
+        })?
+        .unwrap_or_default();
+    let request = llm_context_to_model_request(&llm_context, provider_options)?;
     let body = build_stream_request_body(protocol, &model.id, &request, output_limit)?;
     let plan = crate::config::plan_for_provider_id(&model.provider);
     let url = stream_url(plan, protocol);

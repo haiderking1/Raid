@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::backend::session::SessionSummary;
 use crate::frontend::clip::render_clipped;
 use crate::frontend::composer::{paint_input_editor, padded_input_layout, ComposerState};
@@ -22,6 +24,7 @@ pub struct SessionPaletteWidget<'a> {
     filtered: &'a [usize],
     selected: usize,
     status: &'a str,
+    current: Option<&'a Path>,
 }
 
 impl<'a> SessionPaletteWidget<'a> {
@@ -31,6 +34,7 @@ impl<'a> SessionPaletteWidget<'a> {
         filtered: &'a [usize],
         selected: usize,
         status: &'a str,
+        current: Option<&'a Path>,
     ) -> Self {
         Self {
             search,
@@ -38,6 +42,7 @@ impl<'a> SessionPaletteWidget<'a> {
             filtered,
             selected: selected.min(filtered.len().saturating_sub(1)),
             status,
+            current,
         }
     }
 }
@@ -81,7 +86,13 @@ impl Widget for SessionPaletteWidget<'_> {
                 };
                 let selected = start + row == self.selected;
                 let marker = if selected { "→" } else { " " };
-                let lock = if session.locked { "  open" } else { "" };
+                let lock = if self.current == Some(session.path.as_path()) {
+                    "  current"
+                } else if session.locked {
+                    "  open"
+                } else {
+                    ""
+                };
                 let text = format!(
                     "{marker} {}  {} messages{lock}",
                     session.title, session.message_count
