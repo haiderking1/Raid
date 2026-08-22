@@ -13,10 +13,19 @@ pub struct ShellLayout {
     pub palette: Option<Rect>,
 }
 
-pub fn shell_layout(area: Rect, composer: &ComposerState, tools_height: u16) -> ShellLayout {
+pub fn shell_layout(
+    area: Rect,
+    composer: &ComposerState,
+    tools_height: u16,
+    thinking_visible: bool,
+) -> ShellLayout {
     let dock = docked_layout(area, composer);
     let above = dock.composer.y.saturating_sub(area.y);
-    let thinking_height = THINKING_RESERVE.min(above);
+    let thinking_height = if thinking_visible {
+        THINKING_RESERVE.min(above)
+    } else {
+        0
+    };
     let tools_height = tools_height.min(above.saturating_sub(thinking_height));
     let thinking = (thinking_height > 0).then_some(Rect {
         x: area.x,
@@ -58,7 +67,7 @@ mod tests {
     #[test]
     fn thinking_slot_sits_on_the_composer() {
         let composer = ComposerState::default();
-        let layout = shell_layout(Rect::new(0, 0, 40, 20), &composer, 0);
+        let layout = shell_layout(Rect::new(0, 0, 40, 20), &composer, 0, true);
         let thinking = layout.thinking.expect("thinking slot");
         assert_eq!(thinking.height, THINKING_RESERVE);
         assert_eq!(thinking.y + thinking.height, layout.composer.y);
@@ -67,9 +76,18 @@ mod tests {
     }
 
     #[test]
+    fn idle_layout_does_not_reserve_a_thinking_slot() {
+        let composer = ComposerState::default();
+        let layout = shell_layout(Rect::new(0, 0, 40, 20), &composer, 0, false);
+
+        assert!(layout.thinking.is_none());
+        assert_eq!(layout.chat.y + layout.chat.height, layout.composer.y);
+    }
+
+    #[test]
     fn chat_sits_above_tools_and_thinking() {
         let composer = ComposerState::default();
-        let layout = shell_layout(Rect::new(0, 0, 40, 20), &composer, 2);
+        let layout = shell_layout(Rect::new(0, 0, 40, 20), &composer, 2, true);
         assert_eq!(layout.composer.height, 3);
         let thinking = layout.thinking.expect("thinking");
         let tools = layout.tools.expect("tools");

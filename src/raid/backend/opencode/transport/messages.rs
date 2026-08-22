@@ -213,6 +213,11 @@ pub fn chat_completion_messages(
                         })),
                     }
                 }
+                // Aborted or empty responses can remain in session history. Sending one back
+                // without content or tool calls is invalid for OpenAI-compatible providers.
+                if text.is_empty() && tool_calls.is_empty() {
+                    continue;
+                }
                 let mut assistant = Map::new();
                 assistant.insert("role".into(), Value::String("assistant".into()));
                 assistant.insert(
@@ -429,4 +434,63 @@ pub struct ModelRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<ModelTool>,
     pub provider_options: ProviderOptions,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{chat_completion_messages, AssistantPart, Message, MessageRole};
+    use serde_json::json;
+
+    fn assistant(parts: Vec<AssistantPart>) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            content_text: None,
+            assistant_parts: parts,
+            tool_results: Vec::new(),
+            provider_metadata: None,
+        }
+    }
+
+    #[test]
+    fn skips_empty_assistant_messages_for_chat_completions() {
+        let messages = vec![
+            Message {
+                role: MessageRole::User,
+                content_text: Some("first".into()),
+                assistant_parts: Vec::new(),
+                tool_results: Vec::new(),
+                provider_metadata: None,
+            },
+            assistant(Vec::new()),
+            Message {
+                role: MessageRole::User,
+                content_text: Some("second".into()),
+                assistant_parts: Vec::new(),
+                tool_results: Vec::new(),
+                provider_metadata: None,
+            },
+        ];
+
+        let wire = chat_completion_messages(&messages, "test-model").expect("wire messages");
+
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0], json!({ "role": "user", "content": "first" }));
+        assert_eq!(wire[1], json!({ "role": "user", "content": "second" }));
+    }
+
+    #[test]
+    fn preserves_assistant_tool_calls_without_text() {
+        let messages = vec![assistant(vec![AssistantPart::ToolCall {
+            tool_call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            input: json!({ "command": "pwd" }),
+        }])];
+
+        let wire = chat_completion_messages(&messages, "test-model").expect("wire messages");
+
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "assistant");
+        assert!(wire[0]["content"].is_null());
+        assert_eq!(wire[0]["tool_calls"][0]["id"], "call-1");
+    }
 }

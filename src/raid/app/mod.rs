@@ -367,7 +367,12 @@ impl App {
         } else if self.session.active() {
             self.draw_session(frame, body)
         } else {
-            let layout = shell_layout(body, &self.composer, 0);
+            let layout = shell_layout(
+                body,
+                &self.composer,
+                0,
+                self.activity.widget().is_some(),
+            );
 
             if layout.chat.height > 0 {
                 let width = layout.chat.width as usize;

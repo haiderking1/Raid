@@ -267,6 +267,14 @@ async fn run_loop(
             })
             .await;
 
+            if cancel.is_cancelled() {
+                emit(AgentEvent::AgentEnd {
+                    messages: new_messages.clone(),
+                })
+                .await;
+                return;
+            }
+
             let next_turn_context = ShouldStopAfterTurnContext {
                 message: message.clone(),
                 tool_results: tool_results.clone(),
@@ -571,9 +579,6 @@ async fn execute_tool_calls_sequential(
         finalized_calls.push(finalized);
         messages.push(tool_result_message);
 
-        if cancel.is_cancelled() {
-            break;
-        }
     }
 
     ExecutedToolCallBatch {
@@ -610,9 +615,6 @@ async fn execute_tool_calls_parallel(
                 };
                 emit_tool_execution_end(&finalized, emit.clone()).await;
                 entries.push(FinalizedToolCallEntry::Ready(finalized));
-                if cancel.is_cancelled() {
-                    break;
-                }
             }
             ToolPreparation::Prepared(prepared) => {
                 let current_context = current_context.clone();
@@ -634,9 +636,6 @@ async fn execute_tool_calls_parallel(
                     emit_tool_execution_end(&finalized, emit).await;
                     finalized
                 })));
-                if cancel.is_cancelled() {
-                    break;
-                }
             }
         }
     }

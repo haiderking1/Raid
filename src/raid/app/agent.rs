@@ -299,9 +299,6 @@ impl AgentSession {
     fn on_message_start(&mut self, chat: &mut ViewportState, message: AgentMessage) {
         if let AgentMessage::Assistant(assistant) = message {
             let text = assistant_text(&assistant);
-            if !text.is_empty() {
-                self.activity_visible = false;
-            }
             self.assistant_index = (!text.is_empty()).then(|| chat.append_assistant(text));
         }
     }
@@ -321,12 +318,6 @@ impl AgentSession {
             }
             AssistantMessageEvent::ThinkingEnd { .. } => {
                 self.activity_visible = true;
-            }
-            AssistantMessageEvent::TextDelta { delta, .. } if !delta.is_empty() => {
-                self.activity_visible = false;
-            }
-            AssistantMessageEvent::TextEnd { content, .. } if !content.is_empty() => {
-                self.activity_visible = false;
             }
             AssistantMessageEvent::ToolcallStart { .. }
             | AssistantMessageEvent::ToolcallDelta { .. }
@@ -1140,6 +1131,28 @@ mod tests {
             extract_first_bold("**Inspecting files**\nMore reasoning **later**").as_deref(),
             Some("Inspecting files")
         );
+    }
+
+    #[test]
+    fn streamed_text_keeps_the_activity_indicator_visible() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut session = AgentSession::new(rt.handle().clone());
+        session.activity_visible = true;
+        let partial = assistant_message(
+            vec![AssistantContent::Text(TextContent::new("hello"))],
+            StopReason::Stop,
+        );
+
+        session.on_assistant_stream_event(&AssistantMessageEvent::TextDelta {
+            content_index: 0,
+            delta: "hello".into(),
+            partial,
+        });
+
+        assert!(session.activity_visible);
     }
 
     #[test]

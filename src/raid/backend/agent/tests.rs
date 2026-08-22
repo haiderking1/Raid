@@ -10,7 +10,8 @@ use tokio_util::sync::CancellationToken;
 use super::{
     agent_loop, agent_loop_continue, set_default_stream_fn, AgentContext, AgentEvent, AgentLoopConfig,
     AgentMessage, AgentTool, AssistantContent, AssistantMessageEvent, Model, StopReason,
-    TextContent, ToolCall, ToolResultContent, UserMessage, TOOL_EXECUTION_PARALLEL, StreamFn,
+    TextContent, ToolCall, ToolResultContent, UserMessage, TOOL_EXECUTION_PARALLEL,
+    TOOL_EXECUTION_SEQUENTIAL, StreamFn,
 };
 use super::{
     assistant_message, assistant_message_stream, identity_convert_async, AgentLoopHandle,
@@ -310,6 +311,112 @@ async fn executes_tool_calls_and_emits_tool_events() {
         event,
         AgentEvent::ToolExecutionEnd { is_error: false, .. }
     )));
+}
+
+#[tokio::test]
+async fn cancellation_records_results_for_every_sequential_tool_call() {
+    struct WaitForCancellation {
+        started: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl AgentTool for WaitForCancellation {
+        fn name(&self) -> &str {
+            "wait"
+        }
+
+        fn description(&self) -> &str {
+            "wait"
+        }
+
+        fn parameters_schema(&self) -> &Value {
+            static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| json!({ "type": "object" }))
+        }
+
+        fn execution_mode(&self) -> Option<&'static str> {
+            Some(TOOL_EXECUTION_SEQUENTIAL)
+        }
+
+        async fn execute(
+            &self,
+            _tool_call_id: &str,
+            _args: Value,
+            cancel: &CancellationToken,
+            _on_update: Option<Box<dyn Fn(AgentToolResult) + Send + Sync>>,
+        ) -> AgentToolResult {
+            self.started.notify_one();
+            cancel.cancelled().await;
+            AgentToolResult {
+                content: vec![ToolResultContent::text("Operation aborted")],
+                details: Value::Null,
+                usage: None,
+                added_tool_names: None,
+                terminate: false,
+                is_error: true,
+            }
+        }
+    }
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let context = AgentContext {
+        system_prompt: String::new(),
+        messages: Vec::new(),
+        tools: vec![Arc::new(WaitForCancellation {
+            started: started.clone(),
+        })],
+    };
+    let responses = Arc::new(Mutex::new(vec![assistant_message(
+        vec![
+            AssistantContent::ToolCall(ToolCall::new("tool-1", "wait", json!({}))),
+            AssistantContent::ToolCall(ToolCall::new("tool-2", "wait", json!({}))),
+        ],
+        StopReason::ToolUse,
+    )]));
+    let mut config = identity_config();
+    config.tool_execution = TOOL_EXECUTION_SEQUENTIAL;
+    let cancel = CancellationToken::new();
+    let handle = agent_loop(
+        vec![AgentMessage::User(UserMessage::new("wait twice"))],
+        context,
+        config,
+        cancel.clone(),
+        Some(mock_stream_fn(responses)),
+    );
+    let collector = tokio::spawn(collect_loop(handle));
+
+    started.notified().await;
+    cancel.cancel();
+    let (events, messages) = collector.await.expect("collector");
+
+    let tool_results = messages
+        .iter()
+        .filter_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tool_results.len(), 2);
+    assert!(tool_results.iter().all(|result| result.is_error));
+    assert_eq!(
+        tool_results
+            .iter()
+            .map(|result| result.tool_call_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-1", "tool-2"]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                AgentEvent::MessageEnd {
+                    message: AgentMessage::ToolResult(_)
+                }
+            ))
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]

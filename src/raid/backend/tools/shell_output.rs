@@ -5,8 +5,14 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::time::timeout;
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+
+#[cfg(unix)]
+use nix::sys::signal::{Signal, killpg};
+#[cfg(unix)]
+use nix::unistd::Pid;
 
 use super::env::ToolEnvironment;
 use super::truncate::{
@@ -16,6 +22,7 @@ use super::truncate::{
 
 const MAX_TIMEOUT_SECONDS: f64 = 2_147_483_647.0 / 1000.0;
 const MAX_TAIL_BUFFER_BYTES: usize = DEFAULT_MAX_BYTES * 2;
+const EXIT_STDIO_IDLE_GRACE: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub struct ShellCaptureProgress {
@@ -172,9 +179,13 @@ pub async fn execute_shell_with_capture(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
+    #[cfg(unix)]
+    child.process_group(0);
+
     let mut child = child.spawn().map_err(|error| ShellExecutionError::Failed {
         message: error.to_string(),
     })?;
+    let mut process_group = ProcessGroupGuard::new(&child);
 
     let stdout = child
         .stdout
@@ -190,106 +201,215 @@ pub async fn execute_shell_with_capture(
         })?;
 
     let on_progress = Arc::new(tokio::sync::Mutex::new(on_progress));
+    let reader_stop = CancellationToken::new();
+    let output_activity = Arc::new(AtomicU64::new(0));
 
     let stdout_task = spawn_reader(
         stdout,
         accumulator.clone(),
-        cancel.clone(),
+        reader_stop.clone(),
+        output_activity.clone(),
         on_progress.clone(),
     );
-    let stderr_task = spawn_reader(stderr, accumulator.clone(), cancel.clone(), on_progress);
+    let stderr_task = spawn_reader(
+        stderr,
+        accumulator.clone(),
+        reader_stop.clone(),
+        output_activity.clone(),
+        on_progress,
+    );
 
-    let wait_result = if let Some(seconds) = timeout_seconds {
-        match timeout(
-            Duration::from_secs(seconds),
-            wait_for_child(&mut child, cancel.clone()),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                let _ = child.kill().await;
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
-                let mut guard = accumulator.lock().await;
-                guard.finalize_capture();
-                let progress = guard.progress();
-                drop(guard);
-                return Ok(progress.into_result(
-                    None,
-                    false,
-                    Some(ShellExecutionError::Timeout { seconds }),
-                ));
-            }
+    let wait_result = wait_for_child(&mut child, cancel, timeout_seconds).await;
+    let (exit_code, cancelled, execution_error, drain_readers) = match wait_result {
+        ChildWaitResult::Exited(Ok(status)) => (status.code(), false, None, true),
+        ChildWaitResult::Exited(Err(error)) => {
+            terminate_process_tree(&mut child, &mut process_group).await;
+            (
+                None,
+                false,
+                Some(ShellExecutionError::Failed {
+                    message: error.to_string(),
+                }),
+                false,
+            )
         }
-    } else {
-        wait_for_child(&mut child, cancel.clone()).await
+        ChildWaitResult::Cancelled => {
+            terminate_process_tree(&mut child, &mut process_group).await;
+            (None, true, None, false)
+        }
+        ChildWaitResult::TimedOut { seconds } => {
+            terminate_process_tree(&mut child, &mut process_group).await;
+            (
+                None,
+                false,
+                Some(ShellExecutionError::Timeout { seconds }),
+                false,
+            )
+        }
     };
 
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    finish_reader_tasks(
+        stdout_task,
+        stderr_task,
+        reader_stop,
+        output_activity,
+        drain_readers,
+    )
+    .await;
+    process_group.disarm();
 
     let mut guard = accumulator.lock().await;
     guard.finalize_capture();
     let progress = guard.progress();
     drop(guard);
 
-    if let Ok(()) = &wait_result {
-        if cancel.is_cancelled() {
-            let _ = child.kill().await;
-            return Ok(progress.into_result(None, true, None));
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => Ok(progress.into_result(status.code(), false, None)),
-            Ok(None) => Ok(progress.into_result(None, false, None)),
-            Err(error) => Ok(progress.into_result(
-                None,
-                false,
-                Some(ShellExecutionError::Failed {
-                    message: error.to_string(),
-                }),
-            )),
-        }
-    } else if cancel.is_cancelled() {
-        let _ = child.kill().await;
-        Ok(progress.into_result(None, true, None))
-    } else {
-        Ok(progress.into_result(
-            None,
-            false,
-            Some(ShellExecutionError::Failed {
-                message: wait_result.unwrap_err().to_string(),
-            }),
-        ))
-    }
+    Ok(progress.into_result(exit_code, cancelled, execution_error))
+}
+
+enum ChildWaitResult {
+    Exited(Result<std::process::ExitStatus, std::io::Error>),
+    Cancelled,
+    TimedOut { seconds: u64 },
 }
 
 async fn wait_for_child(
     child: &mut Child,
-    cancel: CancellationToken,
-) -> Result<(), std::io::Error> {
-    tokio::select! {
-        _ = cancel.cancelled() => Ok(()),
-        result = child.wait() => result.map(|_| ()),
+    cancel: &CancellationToken,
+    timeout_seconds: Option<u64>,
+) -> ChildWaitResult {
+    if let Some(seconds) = timeout_seconds {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => ChildWaitResult::Cancelled,
+            _ = sleep(Duration::from_secs(seconds)) => ChildWaitResult::TimedOut { seconds },
+            result = child.wait() => ChildWaitResult::Exited(result),
+        }
+    } else {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => ChildWaitResult::Cancelled,
+            result = child.wait() => ChildWaitResult::Exited(result),
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn terminate_process_tree(child: &mut Child, process_group: &mut ProcessGroupGuard) {
+    let group_killed = process_group.kill();
+    if !group_killed {
+        let _ = child.start_kill();
+    }
+    let _ = child.wait().await;
+}
+
+#[cfg(windows)]
+async fn terminate_process_tree(child: &mut Child, _process_group: &mut ProcessGroupGuard) {
+    if let Some(pid) = child.id() {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .status()
+            .await;
+    }
+    let _ = child.kill().await;
+}
+
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    process_group: Option<Pid>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(child: &Child) -> Self {
+        Self {
+            process_group: child
+                .id()
+                .and_then(|pid| i32::try_from(pid).ok())
+                .map(Pid::from_raw),
+        }
+    }
+
+    fn kill(&mut self) -> bool {
+        self.process_group
+            .take()
+            .is_some_and(|process_group| killpg(process_group, Signal::SIGKILL).is_ok())
+    }
+
+    fn disarm(&mut self) {
+        self.process_group = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        let _ = self.kill();
+    }
+}
+
+#[cfg(windows)]
+struct ProcessGroupGuard;
+
+#[cfg(windows)]
+impl ProcessGroupGuard {
+    fn new(_child: &Child) -> Self {
+        Self
+    }
+
+    fn disarm(&mut self) {}
+}
+
+async fn finish_reader_tasks(
+    stdout_task: JoinHandle<()>,
+    stderr_task: JoinHandle<()>,
+    reader_stop: CancellationToken,
+    output_activity: Arc<AtomicU64>,
+    drain: bool,
+) {
+    if !drain {
+        reader_stop.cancel();
+        let _ = tokio::join!(stdout_task, stderr_task);
+        return;
+    }
+
+    let readers = async move {
+        let _ = tokio::join!(stdout_task, stderr_task);
+    };
+    tokio::pin!(readers);
+    loop {
+        let activity = output_activity.load(Ordering::Relaxed);
+        tokio::select! {
+            _ = &mut readers => break,
+            _ = sleep(EXIT_STDIO_IDLE_GRACE) => {
+                if output_activity.load(Ordering::Relaxed) == activity {
+                    reader_stop.cancel();
+                    readers.await;
+                    break;
+                }
+            }
+        }
     }
 }
 
 fn spawn_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     reader: R,
     accumulator: Arc<tokio::sync::Mutex<OutputAccumulator>>,
-    cancel: CancellationToken,
+    stop: CancellationToken,
+    output_activity: Arc<AtomicU64>,
     on_progress: Arc<tokio::sync::Mutex<Option<Box<dyn FnMut(ShellCaptureProgress) + Send>>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
         let mut buffer = [0u8; 4096];
         loop {
-            if cancel.is_cancelled() {
-                break;
-            }
-            match reader.read(&mut buffer).await {
+            let read = tokio::select! {
+                _ = stop.cancelled() => break,
+                read = reader.read(&mut buffer) => read,
+            };
+            match read {
                 Ok(0) => break,
                 Ok(count) => {
+                    output_activity.fetch_add(1, Ordering::Relaxed);
                     let chunk = String::from_utf8_lossy(&buffer[..count]);
                     let progress = {
                         let mut guard = accumulator.lock().await;

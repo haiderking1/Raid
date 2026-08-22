@@ -172,3 +172,115 @@ async fn bash_emits_progress_updates() {
     assert!(captured.len() >= 2);
     assert_eq!(captured[0], 0);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_cancellation_kills_the_entire_process_group() {
+    let (path, _cleanup) = temp_workspace();
+    let child_pid_path = path.join("child.pid");
+    let env = Arc::new(ToolEnvironment::with_cwd(path));
+    let bash = Arc::new(BashTool::new(env));
+    let cancel = CancellationToken::new();
+    let command = format!(
+        "python3 -c 'import subprocess; child = subprocess.Popen([\"sh\", \"-c\", \"trap \\\"\\\" TERM INT; while :; do sleep 1; done\"]); open(\"{}\", \"w\").write(str(child.pid)); child.wait()'",
+        child_pid_path.display()
+    );
+
+    let task = {
+        let bash = bash.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            bash.execute(
+                "call-cancel",
+                serde_json::json!({ "command": command }),
+                &cancel,
+                None,
+            )
+            .await
+        })
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !child_pid_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child pid file");
+    let child_pid = std::fs::read_to_string(&child_pid_path)
+        .expect("read child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("child pid");
+
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("bash cancellation should not hang")
+        .expect("bash task");
+
+    assert!(result.is_error);
+    assert!(text(&result).contains("Command aborted"));
+    assert!(wait_for_process_to_exit(child_pid).await);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_a_bash_task_kills_the_entire_process_group() {
+    let (path, _cleanup) = temp_workspace();
+    let child_pid_path = path.join("dropped-child.pid");
+    let env = Arc::new(ToolEnvironment::with_cwd(path));
+    let bash = Arc::new(BashTool::new(env));
+    let command = format!(
+        "python3 -c 'import subprocess; child = subprocess.Popen([\"sh\", \"-c\", \"while :; do sleep 1; done\"]); open(\"{}\", \"w\").write(str(child.pid)); child.wait()'",
+        child_pid_path.display()
+    );
+    let task = tokio::spawn(async move {
+        bash.execute(
+            "call-drop",
+            serde_json::json!({ "command": command }),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !child_pid_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child pid file");
+    let child_pid = std::fs::read_to_string(&child_pid_path)
+        .expect("read child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("child pid");
+
+    task.abort();
+    let _ = task.await;
+
+    assert!(wait_for_process_to_exit(child_pid).await);
+}
+
+#[cfg(unix)]
+async fn wait_for_process_to_exit(pid: u32) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !process_is_gone(pid) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[cfg(unix)]
+fn process_is_gone(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return true;
+    };
+    stat.rsplit_once(") ")
+        .and_then(|(_, fields)| fields.chars().next())
+        .is_some_and(|state| state == 'Z')
+}

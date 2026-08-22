@@ -135,13 +135,11 @@ impl ViewportState {
 
     fn rendered_rows(&self, cache: &mut MarkdownCache, width: usize) -> Vec<RenderedRow> {
         let mut rows = Vec::new();
-        for (index, item) in self.items.iter().enumerate() {
+        for item in &self.items {
             match item {
                 TimelineItem::Message { role, body } => {
                     push_message_rows(&mut rows, cache, width, *role, body);
-                    if self.items.get(index + 1).is_some() {
-                        rows.push(RenderedRow::Gap);
-                    }
+                    rows.push(RenderedRow::Gap);
                 }
                 TimelineItem::Tool(call) => {
                     rows.push(RenderedRow::ToolHeader(call.clone()));
@@ -156,14 +154,9 @@ impl ViewportState {
                     } else {
                         rows.push(RenderedRow::ToolResult(call.clone()));
                     }
-                    if self.items.get(index + 1).is_some() {
-                        rows.push(RenderedRow::Gap);
-                    }
+                    rows.push(RenderedRow::Gap);
                 }
             }
-        }
-        if matches!(rows.last(), Some(RenderedRow::Gap)) {
-            rows.pop();
         }
         rows
     }
@@ -329,6 +322,15 @@ mod tests {
         viewport.push(Role::User, "two".into());
         assert_eq!(viewport.scroll_from_bottom, 0);
         assert_eq!(viewport.items.len(), 2);
+    }
+
+    #[test]
+    fn latest_message_keeps_one_trailing_gap() {
+        let mut viewport = ViewportState::default();
+        viewport.push(Role::User, "hello".into());
+        let mut cache = MarkdownCache::default();
+
+        assert_eq!(viewport.content_height(&mut cache, 20), 2);
     }
 
     #[test]

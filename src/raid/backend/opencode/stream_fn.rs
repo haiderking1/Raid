@@ -134,55 +134,112 @@ async fn run_live_stream(
 pub mod adapter {
     use super::*;
     use crate::backend::agent::{
-        AgentMessage, AssistantContent, LlmMessage, ToolResultMessage,
+        AgentMessage, AssistantContent, LlmMessage, StopReason, ToolResultMessage,
     };
     use serde_json::{json, Value};
+    use std::collections::HashSet;
 
     pub fn agent_messages_to_llm(messages: Vec<AgentMessage>) -> Vec<LlmMessage> {
-        messages
-            .into_iter()
-            .filter_map(|message| match message {
-                AgentMessage::User(user) => Some(LlmMessage {
+        let mut output = Vec::new();
+        let mut pending_tool_calls = Vec::new();
+        let mut tool_result_ids = HashSet::new();
+
+        for message in messages {
+            match message {
+                AgentMessage::User(user) => {
+                    append_missing_tool_results(
+                        &mut output,
+                        &mut pending_tool_calls,
+                        &mut tool_result_ids,
+                    );
+                    output.push(LlmMessage {
                     role: user.role,
                     content: Some(user.content),
                     tool_call_id: None,
                     is_error: None,
-                }),
-            AgentMessage::Assistant(assistant) => {
-                let mut parts = Vec::new();
-                for content in &assistant.content {
-                    match content {
-                        AssistantContent::Text(text) => {
-                            parts.push(json!({ "type": "text", "text": text.text }));
-                        }
-                        AssistantContent::ToolCall(tool_call) => {
-                            parts.push(json!({
-                                "type": "toolCall",
-                                "id": tool_call.id,
-                                "name": tool_call.name,
-                                "arguments": tool_call.arguments,
-                            }));
+                    });
+                }
+                AgentMessage::Assistant(assistant) => {
+                    append_missing_tool_results(
+                        &mut output,
+                        &mut pending_tool_calls,
+                        &mut tool_result_ids,
+                    );
+                    if matches!(assistant.stop_reason, StopReason::Error | StopReason::Aborted) {
+                        continue;
+                    }
+
+                    let mut parts = Vec::new();
+                    for content in &assistant.content {
+                        match content {
+                            AssistantContent::Text(text) => {
+                                parts.push(json!({ "type": "text", "text": text.text }));
+                            }
+                            AssistantContent::ToolCall(tool_call) => {
+                                pending_tool_calls.push(tool_call.id.clone());
+                                parts.push(json!({
+                                    "type": "toolCall",
+                                    "id": tool_call.id,
+                                    "name": tool_call.name,
+                                    "arguments": tool_call.arguments,
+                                }));
+                            }
                         }
                     }
+                    if parts.is_empty() {
+                        continue;
+                    }
+                    output.push(LlmMessage {
+                        role: assistant.role,
+                        content: Some(Value::Array(parts)),
+                        tool_call_id: None,
+                        is_error: None,
+                    });
                 }
-                Some(LlmMessage {
-                    role: assistant.role.clone(),
-                    content: Some(Value::Array(parts)),
-                    tool_call_id: None,
-                    is_error: None,
-                })
+                AgentMessage::ToolResult(tool) => {
+                    tool_result_ids.insert(tool.tool_call_id.clone());
+                    output.push(tool_result_to_llm(&tool));
+                }
             }
-            AgentMessage::ToolResult(tool) => {
-                let text = tool_result_text(&tool);
-                Some(LlmMessage {
-                    role: tool.role.clone(),
-                    content: Some(json!([{ "type": "text", "text": text }])),
-                    tool_call_id: Some(tool.tool_call_id.clone()),
-                    is_error: Some(tool.is_error),
-                })
+        }
+
+        append_missing_tool_results(
+            &mut output,
+            &mut pending_tool_calls,
+            &mut tool_result_ids,
+        );
+        output
+    }
+
+    fn append_missing_tool_results(
+        output: &mut Vec<LlmMessage>,
+        pending_tool_calls: &mut Vec<String>,
+        tool_result_ids: &mut HashSet<String>,
+    ) {
+        for tool_call_id in pending_tool_calls.drain(..) {
+            if !tool_result_ids.contains(&tool_call_id) {
+                output.push(LlmMessage {
+                    role: "toolResult".into(),
+                    content: Some(json!([{
+                        "type": "text",
+                        "text": "No result was recorded for this tool call."
+                    }])),
+                    tool_call_id: Some(tool_call_id),
+                    is_error: Some(true),
+                });
             }
-            })
-            .collect()
+        }
+        tool_result_ids.clear();
+    }
+
+    fn tool_result_to_llm(tool: &ToolResultMessage) -> LlmMessage {
+        let text = tool_result_text(tool);
+        LlmMessage {
+            role: tool.role.clone(),
+            content: Some(json!([{ "type": "text", "text": text }])),
+            tool_call_id: Some(tool.tool_call_id.clone()),
+            is_error: Some(tool.is_error),
+        }
     }
 
     pub fn llm_context_to_model_request(
@@ -404,5 +461,79 @@ mod adapter_tests {
             .expect("tool");
         assert_eq!(tool.tool_results[0].tool_call_id, "call-1");
         assert!(!tool.tool_results[0].is_error);
+    }
+
+    #[test]
+    fn repairs_an_orphaned_tool_call_before_the_next_user_message() {
+        let messages = vec![
+            crate::backend::agent::AgentMessage::User(UserMessage::new("start")),
+            crate::backend::agent::AgentMessage::Assistant(assistant_message(
+                vec![AssistantContent::ToolCall(ToolCall::new(
+                    "call-1",
+                    "bash",
+                    json!({ "command": "sleep 60" }),
+                ))],
+                crate::backend::agent::StopReason::ToolUse,
+            )),
+            crate::backend::agent::AgentMessage::User(UserMessage::new("continue")),
+        ];
+
+        let llm_messages = agent_messages_to_llm(messages);
+
+        assert_eq!(
+            llm_messages
+                .iter()
+                .map(|message| message.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user", "assistant", "toolResult", "user"]
+        );
+        let repair = &llm_messages[2];
+        assert_eq!(repair.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(repair.is_error, Some(true));
+
+        let request = llm_context_to_model_request(
+            &LlmContext {
+                system_prompt: None,
+                messages: llm_messages,
+                tools: Vec::new(),
+            },
+            ProviderOptions::default(),
+        )
+        .expect("request");
+        assert_eq!(
+            request
+                .messages
+                .iter()
+                .map(|message| &message.role)
+                .collect::<Vec<_>>(),
+            vec![
+                &MessageRole::User,
+                &MessageRole::Assistant,
+                &MessageRole::Tool,
+                &MessageRole::User,
+            ]
+        );
+        assert_eq!(request.messages[2].tool_results[0].tool_call_id, "call-1");
+        assert!(request.messages[2].tool_results[0].is_error);
+    }
+
+    #[test]
+    fn omits_aborted_and_error_assistant_messages_from_replay() {
+        let messages = vec![
+            crate::backend::agent::AgentMessage::Assistant(assistant_message(
+                vec![AssistantContent::Text(TextContent::new("partial"))],
+                crate::backend::agent::StopReason::Aborted,
+            )),
+            crate::backend::agent::AgentMessage::Assistant(assistant_message(
+                vec![AssistantContent::Text(TextContent::new("provider error"))],
+                crate::backend::agent::StopReason::Error,
+            )),
+            crate::backend::agent::AgentMessage::User(UserMessage::new("retry")),
+        ];
+
+        let llm_messages = agent_messages_to_llm(messages);
+
+        assert_eq!(llm_messages.len(), 1);
+        assert_eq!(llm_messages[0].role, "user");
     }
 }
