@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, BufReader};
@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::env::ToolEnvironment;
 use super::truncate::{
-    truncate_tail, TruncatedBy, TruncationOptions, TruncationResult, utf8_byte_length,
-    DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES,
+    DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, TruncatedBy, TruncationOptions, TruncationResult,
+    truncate_tail, utf8_byte_length,
 };
 
 const MAX_TIMEOUT_SECONDS: f64 = 2_147_483_647.0 / 1000.0;
@@ -77,9 +77,75 @@ pub fn sanitize_binary_output(input: &str) -> String {
         .filter(|ch| {
             let code = *ch as u32;
             (code == 0x09 || code == 0x0a || code == 0x0d)
-                || (code > 0x1f && !(0xfff9..=0xfffb).contains(&code))
+                || (code > 0x1f
+                    && !(0x7f..=0x9f).contains(&code)
+                    && !(0xfff9..=0xfffb).contains(&code))
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum EscapeState {
+    #[default]
+    Ground,
+    Escape,
+    EscapeIntermediate,
+    Csi,
+    String,
+    StringEscape,
+}
+
+#[derive(Debug, Default)]
+struct TerminalSequenceStripper {
+    state: EscapeState,
+}
+
+impl TerminalSequenceStripper {
+    fn push(&mut self, input: &str) -> String {
+        let mut output = String::with_capacity(input.len());
+        for character in input.chars() {
+            match self.state {
+                EscapeState::Ground => match character {
+                    '\u{001b}' => self.state = EscapeState::Escape,
+                    '\u{009b}' => self.state = EscapeState::Csi,
+                    '\u{0090}' | '\u{0098}' | '\u{009d}' | '\u{009e}' | '\u{009f}' => {
+                        self.state = EscapeState::String;
+                    }
+                    '\u{0080}'..='\u{009f}' | '\u{007f}' => {}
+                    _ => output.push(character),
+                },
+                EscapeState::Escape => match character {
+                    '[' => self.state = EscapeState::Csi,
+                    ']' | 'P' | 'X' | '^' | '_' => self.state = EscapeState::String,
+                    '\u{0020}'..='\u{002f}' => self.state = EscapeState::EscapeIntermediate,
+                    '\u{001b}' => {}
+                    _ => self.state = EscapeState::Ground,
+                },
+                EscapeState::EscapeIntermediate => match character {
+                    '\u{0020}'..='\u{002f}' => {}
+                    '\u{0030}'..='\u{007e}' => self.state = EscapeState::Ground,
+                    '\u{001b}' => self.state = EscapeState::Escape,
+                    _ => self.state = EscapeState::Ground,
+                },
+                EscapeState::Csi => match character {
+                    '\u{0040}'..='\u{007e}' => self.state = EscapeState::Ground,
+                    '\u{001b}' => self.state = EscapeState::Escape,
+                    _ => {}
+                },
+                EscapeState::String => match character {
+                    '\u{0007}' | '\u{009c}' => self.state = EscapeState::Ground,
+                    '\u{001b}' => self.state = EscapeState::StringEscape,
+                    _ => {}
+                },
+                EscapeState::StringEscape => match character {
+                    '\\' => self.state = EscapeState::Ground,
+                    '\u{001b}' => {}
+                    _ => self.state = EscapeState::String,
+                },
+            }
+        }
+        output
+    }
 }
 
 pub async fn execute_shell_with_capture(
@@ -106,26 +172,39 @@ pub async fn execute_shell_with_capture(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = child
-        .spawn()
-        .map_err(|error| ShellExecutionError::Failed {
-            message: error.to_string(),
-        })?;
+    let mut child = child.spawn().map_err(|error| ShellExecutionError::Failed {
+        message: error.to_string(),
+    })?;
 
-    let stdout = child.stdout.take().ok_or_else(|| ShellExecutionError::Failed {
-        message: "Failed to capture shell stdout".into(),
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| ShellExecutionError::Failed {
-        message: "Failed to capture shell stderr".into(),
-    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ShellExecutionError::Failed {
+            message: "Failed to capture shell stdout".into(),
+        })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ShellExecutionError::Failed {
+            message: "Failed to capture shell stderr".into(),
+        })?;
 
     let on_progress = Arc::new(tokio::sync::Mutex::new(on_progress));
 
-    let stdout_task = spawn_reader(stdout, accumulator.clone(), cancel.clone(), on_progress.clone());
+    let stdout_task = spawn_reader(
+        stdout,
+        accumulator.clone(),
+        cancel.clone(),
+        on_progress.clone(),
+    );
     let stderr_task = spawn_reader(stderr, accumulator.clone(), cancel.clone(), on_progress);
 
     let wait_result = if let Some(seconds) = timeout_seconds {
-        match timeout(Duration::from_secs(seconds), wait_for_child(&mut child, cancel.clone())).await
+        match timeout(
+            Duration::from_secs(seconds),
+            wait_for_child(&mut child, cancel.clone()),
+        )
+        .await
         {
             Ok(result) => result,
             Err(_) => {
@@ -185,7 +264,10 @@ pub async fn execute_shell_with_capture(
     }
 }
 
-async fn wait_for_child(child: &mut Child, cancel: CancellationToken) -> Result<(), std::io::Error> {
+async fn wait_for_child(
+    child: &mut Child,
+    cancel: CancellationToken,
+) -> Result<(), std::io::Error> {
     tokio::select! {
         _ = cancel.cancelled() => Ok(()),
         result = child.wait() => result.map(|_| ()),
@@ -244,6 +326,7 @@ impl ShellCaptureProgress {
 }
 
 struct OutputAccumulator {
+    sequence_stripper: TerminalSequenceStripper,
     tail_output: String,
     total_bytes: usize,
     completed_lines: usize,
@@ -257,6 +340,7 @@ struct OutputAccumulator {
 impl OutputAccumulator {
     fn new() -> Self {
         Self {
+            sequence_stripper: TerminalSequenceStripper::default(),
             tail_output: String::new(),
             total_bytes: 0,
             completed_lines: 0,
@@ -272,7 +356,8 @@ impl OutputAccumulator {
         if !self.accepting_output {
             return;
         }
-        let text = sanitize_binary_output(chunk).replace('\r', "");
+        let text = self.sequence_stripper.push(chunk);
+        let text = sanitize_binary_output(&text).replace('\r', "");
         let text_bytes = utf8_byte_length(&text);
         self.total_bytes += text_bytes;
         let newline_count = text.matches('\n').count();
@@ -353,7 +438,8 @@ impl OutputAccumulator {
         self.full_output_requested = true;
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("raid-bash-{}-{}.log", std::process::id(), id));
+        let path =
+            std::env::temp_dir().join(format!("raid-bash-{}-{}.log", std::process::id(), id));
         let _ = std::fs::write(&path, &self.tail_output);
         self.full_output_path = Some(path);
     }
@@ -427,4 +513,26 @@ pub fn format_truncation_footer(capture: &ShellCaptureResult) -> String {
         ));
     }
     output_text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OutputAccumulator;
+
+    #[test]
+    fn strips_color_sequences_split_across_chunks() {
+        let mut output = OutputAccumulator::new();
+        output.push_chunk("before \u{001b}[1;");
+        output.push_chunk("34mblue\u{001b}[0m after");
+
+        assert_eq!(output.progress().output, "before blue after");
+    }
+
+    #[test]
+    fn strips_terminal_title_sequences() {
+        let mut output = OutputAccumulator::new();
+        output.push_chunk("\u{001b}]0;secret title\u{0007}visible");
+
+        assert_eq!(output.progress().output, "visible");
+    }
 }

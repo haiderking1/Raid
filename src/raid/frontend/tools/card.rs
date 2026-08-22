@@ -6,6 +6,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::Line,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 const TOOL: Color = Color::Rgb(70, 183, 128);
 const PATH: Color = Color::Rgb(139, 180, 250);
@@ -24,12 +25,15 @@ pub(crate) fn paint_header(buf: &mut Buffer, area: Rect, y: u16, call: &ToolCall
     paint_span(buf, &mut x, end, y, PREFIX, tool_style());
     paint_span(buf, &mut x, end, y, &name, tool_style());
     paint_span(buf, &mut x, end, y, "(", Style::default().fg(PUNCT));
+    let available = end.saturating_sub(x) as usize;
+    let detail_width = available.saturating_sub(1);
+    let detail = clip_right(&call.detail, detail_width);
     paint_span(
         buf,
         &mut x,
         end,
         y,
-        &call.detail,
+        &detail,
         Style::default().fg(arg_color(&call.detail)),
     );
     paint_span(buf, &mut x, end, y, ")", Style::default().fg(PUNCT));
@@ -47,12 +51,28 @@ pub(crate) fn paint_result(buf: &mut Buffer, area: Rect, y: u16, call: &ToolCall
         Style::default().fg(HINT),
     );
     let style = result_style(call.status);
-    if let Some((body, hint)) = split_hint(&call.summary) {
+    let summary = call.compact_summary();
+    if let Some((body, hint)) = split_hint(&summary) {
         paint_span(buf, &mut x, end, y, body, style);
         paint_span(buf, &mut x, end, y, hint, Style::default().fg(HINT));
     } else {
-        paint_span(buf, &mut x, end, y, &call.summary, style);
+        paint_span(buf, &mut x, end, y, &summary, style);
     }
+}
+
+pub(crate) fn paint_output_line(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    call: &ToolCall,
+    line: &str,
+    first: bool,
+) {
+    let mut x = area.x;
+    let end = area.x.saturating_add(area.width);
+    let prefix = if first { RESULT_PREFIX } else { "    " };
+    paint_span(buf, &mut x, end, y, prefix, Style::default().fg(HINT));
+    paint_span(buf, &mut x, end, y, line, result_style(call.status));
 }
 
 fn tool_style() -> Style {
@@ -78,6 +98,31 @@ fn result_style(status: ToolStatus) -> Style {
 fn split_hint(summary: &str) -> Option<(&str, &str)> {
     let index = summary.find(" (ctrl+")?;
     Some((&summary[..index], &summary[index..]))
+}
+
+fn clip_right(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if Line::from(text).width() <= width {
+        return text.to_string();
+    }
+    if width == 1 {
+        return String::from("…");
+    }
+
+    let mut clipped = String::new();
+    let mut used = 0;
+    for grapheme in text.graphemes(true) {
+        let grapheme_width = Line::from(grapheme).width();
+        if used + grapheme_width > width - 1 {
+            break;
+        }
+        clipped.push_str(grapheme);
+        used += grapheme_width;
+    }
+    clipped.push('…');
+    clipped
 }
 
 fn paint_span(buf: &mut Buffer, x: &mut u16, end: u16, y: u16, text: &str, style: Style) {
@@ -110,10 +155,8 @@ mod tests {
 
     #[test]
     fn success_card_uses_name_parens_and_result_branch() {
-        let call = ToolCall::running("read", "src/raid/main.rs").finished(
-            ToolStatus::Success,
-            "Read 42 lines (ctrl+r to expand)",
-        );
+        let call = ToolCall::running("read", "src/raid/main.rs")
+            .finished(ToolStatus::Success, "first\nsecond\nthird");
         let mut terminal = Terminal::new(TestBackend::new(48, 2)).unwrap();
         terminal
             .draw(|frame| {
@@ -125,7 +168,7 @@ mod tests {
 
         let rendered = screen(&terminal, 48, 2);
         assert!(rendered.contains("● Read(src/raid/main.rs)"));
-        assert!(rendered.contains("└ Read 42 lines (ctrl+r to expand)"));
+        assert!(rendered.contains("└ Read 3 lines (ctrl+o to expand)"));
         assert!(!rendered.contains("✓"));
         assert!(!rendered.contains("done"));
 
@@ -152,5 +195,24 @@ mod tests {
         assert!(rendered.contains("● Bash(cargo test --offline)"));
         assert!(rendered.contains("└ Running"));
         assert!(!rendered.contains("ctrl+r"));
+    }
+
+    #[test]
+    fn long_commands_end_with_an_ellipsis_and_closing_paren() {
+        let call = ToolCall::running(
+            "bash",
+            "cargo test --workspace --all-targets --all-features --locked",
+        );
+        let mut terminal = Terminal::new(TestBackend::new(34, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                super::paint_header(frame.buffer_mut(), area, 0, &call);
+            })
+            .unwrap();
+
+        let rendered = screen(&terminal, 34, 1);
+        assert!(rendered.contains("…)") || rendered.contains("...)"));
+        assert!(!rendered.contains("--locked"));
     }
 }

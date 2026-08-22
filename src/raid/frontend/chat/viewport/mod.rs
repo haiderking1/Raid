@@ -2,7 +2,7 @@ mod item;
 
 use super::cache::MarkdownCache;
 use crate::frontend::clip::render_clipped;
-use crate::frontend::tools::{ToolCall, ToolStatus, paint_header, paint_result};
+use crate::frontend::tools::{ToolCall, ToolStatus, paint_header, paint_output_line, paint_result};
 use item::TimelineItem;
 use ratatui::{
     buffer::Buffer,
@@ -28,12 +28,14 @@ pub enum Role {
 pub struct ViewportState {
     items: Vec<TimelineItem>,
     scroll_from_bottom: usize,
+    tool_details_expanded: bool,
 }
 
 impl ViewportState {
     pub fn clear(&mut self) {
         self.items.clear();
         self.scroll_from_bottom = 0;
+        self.tool_details_expanded = false;
     }
 
     pub fn push(&mut self, role: Role, body: String) {
@@ -54,10 +56,10 @@ impl ViewportState {
     }
 
     pub fn update_tool(&mut self, index: usize, summary: impl Into<String>) {
-        if let Some(TimelineItem::Tool(call)) = self.items.get_mut(index) {
-            if call.status == ToolStatus::Running {
-                call.summary = summary.into();
-            }
+        if let Some(TimelineItem::Tool(call)) = self.items.get_mut(index)
+            && call.status == ToolStatus::Running
+        {
+            call.summary = summary.into();
         }
     }
 
@@ -108,6 +110,22 @@ impl ViewportState {
         self.rendered_rows(cache, width).len()
     }
 
+    pub fn toggle_tool_details(&mut self) {
+        if self
+            .items
+            .iter()
+            .any(|item| matches!(item, TimelineItem::Tool(call) if call.is_expandable()))
+        {
+            self.tool_details_expanded = !self.tool_details_expanded;
+            self.scroll_from_bottom = 0;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn tool_details_expanded(&self) -> bool {
+        self.tool_details_expanded
+    }
+
     pub fn widget(&self, cache: &mut MarkdownCache, width: usize) -> ViewportWidget {
         ViewportWidget {
             rows: self.rendered_rows(cache, width),
@@ -127,7 +145,17 @@ impl ViewportState {
                 }
                 TimelineItem::Tool(call) => {
                     rows.push(RenderedRow::ToolHeader(call.clone()));
-                    rows.push(RenderedRow::ToolResult(call.clone()));
+                    if self.tool_details_expanded && call.is_expandable() {
+                        for (line_index, line) in call.summary.lines().enumerate() {
+                            rows.push(RenderedRow::ToolOutput {
+                                call: call.clone(),
+                                line: line.to_string(),
+                                first: line_index == 0,
+                            });
+                        }
+                    } else {
+                        rows.push(RenderedRow::ToolResult(call.clone()));
+                    }
                     if self.items.get(index + 1).is_some() {
                         rows.push(RenderedRow::Gap);
                     }
@@ -171,6 +199,11 @@ enum RenderedRow {
     },
     ToolHeader(ToolCall),
     ToolResult(ToolCall),
+    ToolOutput {
+        call: ToolCall,
+        line: String,
+        first: bool,
+    },
     Gap,
 }
 
@@ -202,6 +235,9 @@ impl Widget for ViewportWidget {
                 }
                 RenderedRow::ToolResult(call) => {
                     paint_result(buf, area, y, call);
+                }
+                RenderedRow::ToolOutput { call, line, first } => {
+                    paint_output_line(buf, area, y, call, line, *first);
                 }
                 RenderedRow::Gap => {}
             }
@@ -375,17 +411,9 @@ mod tests {
         let mut viewport = ViewportState::default();
         viewport.push(Role::Assistant, "I'll inspect the entrypoint.".into());
         let read = viewport.start_tool("read", "src/raid/main.rs");
-        viewport.finish_tool(
-            read,
-            ToolStatus::Success,
-            "Read 42 lines (ctrl+r to expand)",
-        );
+        viewport.finish_tool(read, ToolStatus::Success, "line one\nline two\nline three");
         let bash = viewport.start_tool("bash", "cargo test --offline");
-        viewport.finish_tool(
-            bash,
-            ToolStatus::Success,
-            "Tests passed (ctrl+r to expand)",
-        );
+        viewport.finish_tool(bash, ToolStatus::Success, "test one\ntest two");
         viewport.push(Role::Assistant, "Done.".into());
 
         let mut cache = MarkdownCache::default();
@@ -400,15 +428,38 @@ mod tests {
         let inspect = row_containing(&rendered, "inspect");
         let read = row_containing(&rendered, "Read(");
         let bash = row_containing(&rendered, "Bash(");
-        let result = row_containing(&rendered, "Tests passed");
+        let result = row_containing(&rendered, "Bash 2 lines");
         let done = row_containing(&rendered, "Done");
         assert_eq!(read, inspect + 2);
         assert_eq!(bash, read + 3);
         assert_eq!(done, result + 2);
         assert!(rendered.contains("● Read(src/raid/main.rs)"));
-        assert!(rendered.contains("└ Read 42 lines (ctrl+r to expand)"));
+        assert!(rendered.contains("└ Read 3 lines (ctrl+o to expand)"));
         assert!(rendered.contains("● Bash(cargo test --offline)"));
         assert!(!rendered.contains('✓'));
+    }
+
+    #[test]
+    fn ctrl_o_expansion_renders_each_output_line() {
+        let mut viewport = ViewportState::default();
+        let bash = viewport.start_tool("bash", "ls -la");
+        viewport.finish_tool(bash, ToolStatus::Success, ".git\nCargo.toml\nsrc");
+        let mut cache = MarkdownCache::default();
+
+        viewport.toggle_tool_details();
+        assert!(viewport.tool_details_expanded());
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(viewport.widget(&mut cache, 40), frame.area());
+            })
+            .unwrap();
+
+        let rendered = screen(&terminal, 40, 6);
+        assert!(rendered.contains(".git"));
+        assert!(rendered.contains("Cargo.toml"));
+        assert!(rendered.contains("src"));
+        assert!(!rendered.contains("ctrl+o to expand"));
     }
 
     fn row_containing(screen: &str, needle: &str) -> usize {

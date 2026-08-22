@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -8,20 +8,15 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::agent::{
-    agent_loop, get_default_stream_fn, set_default_stream_fn, AgentContext, AgentEvent,
-    AgentLoopConfig, AgentLoopHandle, AgentMessage, AssistantContent, AssistantMessage,
-    AssistantMessageEvent, LlmContext, LlmMessage, Model, StopReason, StreamFn, StreamOptions,
-    UserMessage,
+    AgentContext, AgentEvent, AgentLoopConfig, AgentLoopHandle, AgentMessage, AssistantContent,
+    AssistantMessage, AssistantMessageEvent, LlmContext, LlmMessage, Model, StopReason, StreamFn,
+    StreamOptions, UserMessage, agent_loop, get_default_stream_fn, set_default_stream_fn,
 };
-use crate::backend::session::{
-    most_recent_session, CompactionRecord, SessionStore, SessionSummary,
-};
+use crate::backend::compaction::{CompactionOutcome, CompactionRequest, compact, should_compact};
 use crate::backend::opencode::types::ReasoningVariant;
-use crate::backend::tools::{default_tools, ToolEnvironment};
-use crate::config::{
-    load_connected_catalog_from_disk, load_provider_catalog_from_disk, resolve_api_key,
-    sessions_dir, RaidSettings,
-};
+use crate::backend::session::{SessionStore, SessionSummary, most_recent_session};
+use crate::backend::tools::{ToolEnvironment, default_tools};
+use crate::config::{RaidSettings, load_provider_catalog_from_disk, resolve_api_key, sessions_dir};
 use crate::frontend::chat::{Role, ViewportState};
 use crate::frontend::tools::ToolStatus;
 use serde_json::Value;
@@ -30,6 +25,7 @@ pub struct AgentSession {
     handle: Option<AgentLoopHandle>,
     context: AgentContext,
     config: AgentLoopConfig,
+    model_limits: (u64, u64),
     cancel: CancellationToken,
     tool_indices: HashMap<String, usize>,
     assistant_index: Option<usize>,
@@ -41,7 +37,11 @@ pub struct AgentSession {
     persisted_messages: HashSet<String>,
     title_task: Option<JoinHandle<Result<String, String>>>,
     compaction_task: Option<JoinHandle<Result<CompactionOutcome, String>>>,
+    manual_compaction: bool,
     pending_submit: Option<String>,
+    activity_header: String,
+    activity_visible: bool,
+    reasoning_buffer: String,
 }
 
 impl AgentSession {
@@ -49,31 +49,35 @@ impl AgentSession {
         let settings = RaidSettings::load();
         let provider_id = settings.provider_id();
         let model_id = settings.model_id().to_string();
+        let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let model = Model {
+            id: model_id.clone(),
+            name: model_id,
+            api: settings.api().into(),
+            provider: provider_id.to_string(),
+        };
+        let model_limits = current_model_limits(&model);
         let mut config = AgentLoopConfig::new(
-            Model {
-                id: model_id.clone(),
-                name: model_id,
-                api: settings.api().into(),
-                provider: provider_id.to_string(),
-            },
+            model,
             Arc::new(crate::backend::opencode::convert_agent_messages),
         );
         config.api_key = resolve_api_key(provider_id);
-        let tool_env = Arc::new(ToolEnvironment::new());
+        let tool_env = Arc::new(ToolEnvironment::with_cwd(project_path.clone()));
         Self {
             handle: None,
             context: AgentContext {
-                system_prompt: String::from("You are a helpful coding agent in a terminal UI."),
+                system_prompt: build_system_prompt(&project_path),
                 messages: Vec::new(),
                 tools: default_tools(tool_env),
             },
             config,
+            model_limits,
             cancel: CancellationToken::new(),
             tool_indices: HashMap::new(),
             assistant_index: None,
             runtime,
             stream_fn: None,
-            project_path: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            project_path,
             session_root: if cfg!(test) {
                 None
             } else {
@@ -83,7 +87,11 @@ impl AgentSession {
             persisted_messages: HashSet::new(),
             title_task: None,
             compaction_task: None,
+            manual_compaction: false,
             pending_submit: None,
+            activity_header: String::from("Working"),
+            activity_visible: false,
+            reasoning_buffer: String::new(),
         }
     }
 
@@ -98,7 +106,9 @@ impl AgentSession {
         self.config.model.api = settings.api().into();
         self.config.model.provider = provider_id.to_string();
         self.config.api_key = resolve_api_key(provider_id);
-        if (previous_provider != self.config.model.provider || previous_model != self.config.model.id)
+        self.model_limits = current_model_limits(&self.config.model);
+        if (previous_provider != self.config.model.provider
+            || previous_model != self.config.model.id)
             && let Some(store) = &mut self.store
             && let Err(error) = store.record_model_change(
                 &self.config.model.provider,
@@ -120,13 +130,28 @@ impl AgentSession {
         self.handle.is_some() || self.compaction_task.is_some()
     }
 
+    pub fn activity_header(&self) -> Option<&str> {
+        (self.is_running() && self.activity_visible).then_some(self.activity_header.as_str())
+    }
+
+    pub fn interrupt(&mut self) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        self.cancel.cancel();
+        if self.compaction_task.is_some() {
+            self.pending_submit = None;
+        }
+        true
+    }
+
     pub fn submit(&mut self, message: String) {
         if self.is_running() {
             return;
         }
         if self.should_compact_before(&message) {
             self.pending_submit = Some(message);
-            self.spawn_compaction();
+            self.spawn_compaction(None, false);
             return;
         }
         self.submit_now(message);
@@ -136,6 +161,9 @@ impl AgentSession {
         self.cancel = CancellationToken::new();
         self.tool_indices.clear();
         self.assistant_index = None;
+        self.activity_header = String::from("Working");
+        self.activity_visible = true;
+        self.reasoning_buffer.clear();
         let prompt = AgentMessage::User(UserMessage::new(message.clone()));
         self.start_session(&message);
         self.persist_message(&prompt);
@@ -173,6 +201,7 @@ impl AgentSession {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     let _ = self.runtime.block_on(handle.result);
                     self.handle = None;
+                    self.activity_visible = false;
                     return;
                 }
             }
@@ -186,16 +215,20 @@ impl AgentSession {
                 message,
                 assistant_message_event,
             } => {
-                let _ = assistant_message_event;
+                self.on_assistant_stream_event(&assistant_message_event);
                 self.on_message_update(chat, message);
             }
-            AgentEvent::MessageEnd { message } => self.on_message_end(message),
+            AgentEvent::MessageEnd { message } => self.on_message_end(chat, message),
             AgentEvent::ToolExecutionStart {
                 tool_call_id,
                 tool_name,
                 args,
             } => {
-                let index = chat.start_tool(tool_name, format_tool_args(&args));
+                self.activity_header = String::from("Working");
+                self.activity_visible = true;
+                self.reasoning_buffer.clear();
+                let detail = format_tool_args(&tool_name, &args);
+                let index = chat.start_tool(tool_name, detail);
                 self.tool_indices.insert(tool_call_id, index);
             }
             AgentEvent::ToolExecutionEnd {
@@ -204,6 +237,8 @@ impl AgentSession {
                 result,
                 is_error,
             } => {
+                self.activity_header = String::from("Working");
+                self.activity_visible = true;
                 if let Some(index) = self.tool_indices.get(&tool_call_id).copied() {
                     let summary = result
                         .content
@@ -234,7 +269,10 @@ impl AgentSession {
                     }
                 }
             }
-            AgentEvent::TurnEnd { message, tool_results } => {
+            AgentEvent::TurnEnd {
+                message,
+                tool_results,
+            } => {
                 let _ = (message, tool_results);
             }
             AgentEvent::ToolExecutionUpdate {
@@ -260,21 +298,71 @@ impl AgentSession {
 
     fn on_message_start(&mut self, chat: &mut ViewportState, message: AgentMessage) {
         if let AgentMessage::Assistant(assistant) = message {
-            self.assistant_index = Some(chat.append_assistant(assistant_text(&assistant)));
+            let text = assistant_text(&assistant);
+            if !text.is_empty() {
+                self.activity_visible = false;
+            }
+            self.assistant_index = (!text.is_empty()).then(|| chat.append_assistant(text));
+        }
+    }
+
+    fn on_assistant_stream_event(&mut self, event: &AssistantMessageEvent) {
+        match event {
+            AssistantMessageEvent::ThinkingStart { .. } => {
+                self.activity_visible = true;
+                self.reasoning_buffer.clear();
+            }
+            AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+                self.activity_visible = true;
+                self.reasoning_buffer.push_str(delta);
+                if let Some(header) = extract_first_bold(&self.reasoning_buffer) {
+                    self.activity_header = header;
+                }
+            }
+            AssistantMessageEvent::ThinkingEnd { .. } => {
+                self.activity_visible = true;
+            }
+            AssistantMessageEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                self.activity_visible = false;
+            }
+            AssistantMessageEvent::TextEnd { content, .. } if !content.is_empty() => {
+                self.activity_visible = false;
+            }
+            AssistantMessageEvent::ToolcallStart { .. }
+            | AssistantMessageEvent::ToolcallDelta { .. }
+            | AssistantMessageEvent::ToolcallEnd { .. } => {
+                self.activity_header = String::from("Working");
+                self.activity_visible = true;
+            }
+            _ => {}
         }
     }
 
     fn on_message_update(&mut self, chat: &mut ViewportState, message: AgentMessage) {
-        if let AgentMessage::Assistant(assistant) = message
-            && let Some(index) = self.assistant_index
-        {
-            chat.update_assistant(index, assistant_text(&assistant));
+        if let AgentMessage::Assistant(assistant) = message {
+            let text = assistant_text(&assistant);
+            if text.is_empty() {
+                return;
+            }
+            if let Some(index) = self.assistant_index {
+                chat.update_assistant(index, text);
+            } else {
+                self.assistant_index = Some(chat.append_assistant(text));
+            }
         }
     }
 
-    fn on_message_end(&mut self, message: AgentMessage) {
+    fn on_message_end(&mut self, chat: &mut ViewportState, message: AgentMessage) {
         self.persist_message(&message);
-        if matches!(message, AgentMessage::Assistant(_)) {
+        if let AgentMessage::Assistant(assistant) = message {
+            let text = assistant_text(&assistant);
+            if !text.is_empty() {
+                if let Some(index) = self.assistant_index {
+                    chat.update_assistant(index, text);
+                } else {
+                    chat.append_assistant(text);
+                }
+            }
             self.assistant_index = None;
         }
     }
@@ -326,20 +414,15 @@ impl AgentSession {
         if self.title_task.is_some() {
             return;
         }
-        let stream_fn = self
-            .stream_fn
-            .clone()
-            .unwrap_or_else(get_default_stream_fn);
+        let stream_fn = self.stream_fn.clone().unwrap_or_else(get_default_stream_fn);
         let settings = RaidSettings::load();
         let model = text_generation_model(&settings);
         let api_key = resolve_api_key(&model.provider);
         let message = first_message.chars().take(8_000).collect::<String>();
-        self.title_task = Some(self.runtime.spawn(generate_session_title(
-            stream_fn,
-            model,
-            api_key,
-            message,
-        )));
+        self.title_task = Some(
+            self.runtime
+                .spawn(generate_session_title(stream_fn, model, api_key, message)),
+        );
     }
 
     pub fn retry_session_title(&mut self) {
@@ -408,30 +491,44 @@ impl AgentSession {
     }
 
     fn should_compact_before(&self, next_message: &str) -> bool {
-        if self.context.messages.len() < 8 {
-            return false;
-        }
-        let context_limit = current_context_limit(&self.config.model.id);
-        let threshold = context_limit.saturating_sub(16_384).max(8_192);
-        let estimated = estimate_message_tokens(&self.context.messages)
-            .saturating_add((next_message.len() as u64).div_ceil(4));
-        estimated > threshold
+        let (context_limit, _) = self.model_limits;
+        should_compact(&self.context.messages, next_message, context_limit)
     }
 
-    fn spawn_compaction(&mut self) {
+    fn spawn_compaction(&mut self, custom_instructions: Option<String>, manual: bool) {
         let messages = self.context.messages.clone();
-        let stream_fn = self
-            .stream_fn
-            .clone()
-            .unwrap_or_else(get_default_stream_fn);
+        let stream_fn = self.stream_fn.clone().unwrap_or_else(get_default_stream_fn);
         let model = self.config.model.clone();
         let api_key = self.config.api_key.clone();
-        self.compaction_task = Some(self.runtime.spawn(generate_compaction(
+        let (context_limit, output_limit) = self.model_limits;
+        self.cancel = CancellationToken::new();
+        self.activity_header = String::from("Working");
+        self.activity_visible = true;
+        self.reasoning_buffer.clear();
+        self.manual_compaction = manual;
+        self.compaction_task = Some(self.runtime.spawn(compact(CompactionRequest {
             stream_fn,
             model,
             api_key,
             messages,
-        )));
+            context_limit,
+            output_limit,
+            custom_instructions,
+            cancel: self.cancel.clone(),
+        })));
+    }
+
+    pub fn compact(&mut self, custom_instructions: String) -> Result<(), String> {
+        if self.is_running() {
+            return Err("Wait for the current response before compacting this session.".into());
+        }
+        if self.context.messages.is_empty() {
+            return Err("There is no conversation to compact yet.".into());
+        }
+        let custom_instructions = (!custom_instructions.trim().is_empty())
+            .then(|| custom_instructions.trim().to_string());
+        self.spawn_compaction(custom_instructions, true);
+        Ok(())
     }
 
     fn poll_compaction(&mut self, chat: &mut ViewportState) {
@@ -441,15 +538,44 @@ impl AgentSession {
         if !task.is_finished() {
             return;
         }
-        let task = self.compaction_task.take().expect("checked compaction task");
+        let task = self
+            .compaction_task
+            .take()
+            .expect("checked compaction task");
+        let manual = std::mem::take(&mut self.manual_compaction);
         match self.runtime.block_on(task) {
             Ok(Ok(outcome)) => {
-                if let Some(store) = &mut self.store
-                    && let Err(error) = store.append_compaction(&outcome.record)
-                {
-                    tracing::warn!(%error, path = %store.path().display(), "session compaction write failed");
+                let persisted = if let Some(store) = &mut self.store {
+                    match store.append_compaction(&outcome.record) {
+                        Ok(_) => true,
+                        Err(error) => {
+                            tracing::warn!(%error, path = %store.path().display(), "session compaction write failed");
+                            chat.push(
+                                Role::Assistant,
+                                format!("Could not save the compacted session context: {error}"),
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    true
+                };
+                if !persisted {
+                    if let Some(message) = self.pending_submit.take() {
+                        self.submit_now(message);
+                    }
+                    return;
                 }
                 self.context.messages = outcome.messages;
+                if manual {
+                    chat.push(
+                        Role::Assistant,
+                        format!(
+                            "Compacted {} tokens to about {}. Recent messages were kept unchanged.",
+                            outcome.record.tokens_before, outcome.estimated_tokens_after
+                        ),
+                    );
+                }
             }
             Ok(Err(error)) => {
                 tracing::warn!(%error, "session compaction failed");
@@ -478,6 +604,9 @@ impl AgentSession {
             task.abort();
         }
         self.pending_submit = None;
+        self.manual_compaction = false;
+        self.activity_visible = false;
+        self.reasoning_buffer.clear();
         self.store = None;
         self.context.messages.clear();
         self.persisted_messages.clear();
@@ -504,8 +633,8 @@ impl AgentSession {
                 snapshot.metadata.canonical_project_path.display()
             ));
         }
-        let current_project = std::fs::canonicalize(&self.project_path)
-            .unwrap_or_else(|_| self.project_path.clone());
+        let current_project =
+            std::fs::canonicalize(&self.project_path).unwrap_or_else(|_| self.project_path.clone());
         if snapshot.metadata.canonical_project_path != current_project {
             return Err(format!(
                 "This session belongs to {}. Start Raid there to resume it.",
@@ -520,18 +649,18 @@ impl AgentSession {
             task.abort();
         }
         self.pending_submit = None;
+        self.manual_compaction = false;
+        self.activity_visible = false;
+        self.reasoning_buffer.clear();
         self.config.model.provider = snapshot.metadata.current_provider.clone();
         self.config.model.id = snapshot.metadata.current_model.clone();
         self.config.model.name = snapshot.metadata.current_model.clone();
         self.config.model.api = snapshot.metadata.current_api.clone();
         self.config.api_key = resolve_api_key(&snapshot.metadata.current_provider);
+        self.model_limits = current_model_limits(&self.config.model);
         self.context.messages = snapshot.active_messages.clone();
-        self.persisted_messages = snapshot
-            .active_messages
-            .iter()
-            .map(message_key)
-            .collect();
-        hydrate_chat(chat, &snapshot.active_messages);
+        self.persisted_messages = snapshot.active_messages.iter().map(message_key).collect();
+        hydrate_chat(chat, &snapshot.display_messages);
         self.store = Some(store);
         self.retry_session_title();
         Ok(())
@@ -541,8 +670,8 @@ impl AgentSession {
         let Some(root) = &self.session_root else {
             return Ok(false);
         };
-        let Some(path) = most_recent_session(root, &self.project_path)
-            .map_err(|error| error.to_string())?
+        let Some(path) =
+            most_recent_session(root, &self.project_path).map_err(|error| error.to_string())?
         else {
             return Ok(false);
         };
@@ -571,6 +700,25 @@ impl AgentSession {
         self.store.as_ref().map(SessionStore::path)
     }
 
+    pub fn model_id(&self) -> &str {
+        &self.config.model.id
+    }
+
+    pub fn context_usage(&self) -> (u64, u64) {
+        (
+            crate::backend::compaction::estimate_context_tokens(&self.context.messages),
+            self.model_limits.0,
+        )
+    }
+
+    pub fn thinking_level(&self) -> &str {
+        self.config.reasoning.as_deref().unwrap_or("default")
+    }
+
+    pub fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
     #[cfg(test)]
     pub fn drive_to_completion(&mut self, chat: &mut ViewportState) {
         let Some(handle) = self.handle.take() else {
@@ -595,18 +743,19 @@ impl AgentSession {
     }
 }
 
+fn build_system_prompt(project_path: &Path) -> String {
+    format!(
+        "You are a helpful coding agent in a terminal UI.\n\nCurrent working directory: {}",
+        project_path.display()
+    )
+}
+
 const SESSION_TITLE_PROMPT: &str = r#"Name this coding session from only the user's first message.
 Return one JSON object with exactly one key: {"title":"..."}.
 Use 3 to 8 words and fewer than 40 characters.
 Summarize the main subject and desired outcome. Ignore instructions about how to do the work.
 Do not mention models, tools, tests, or completion unless they are the subject.
 Do not copy and truncate the message. Avoid filler and trailing punctuation."#;
-const COMPACTION_PROMPT: &str = "Summarize the older part of this coding session so another model can continue the work without reading it. Preserve the user's durable goal, decisions, constraints, errors, unfinished work, exact file paths, commands, test results, and files read or changed. Drop repeated discussion and obsolete attempts. Return only the summary in plain text.";
-
-struct CompactionOutcome {
-    record: CompactionRecord,
-    messages: Vec<AgentMessage>,
-}
 
 async fn generate_session_title(
     stream_fn: StreamFn,
@@ -652,9 +801,9 @@ async fn generate_session_title(
                 });
             }
             AssistantMessageEvent::Error { reason, error } => {
-                return Err(error
-                    .error_message
-                    .unwrap_or_else(|| format!("The title request failed with stop reason {reason:?}.")));
+                return Err(error.error_message.unwrap_or_else(|| {
+                    format!("The title request failed with stop reason {reason:?}.")
+                }));
             }
             _ => {}
         }
@@ -709,106 +858,17 @@ fn title_reasoning_rank(id: &str, label: &str) -> usize {
     }
 }
 
-async fn generate_compaction(
-    stream_fn: StreamFn,
-    model: Model,
-    api_key: Option<String>,
-    messages: Vec<AgentMessage>,
-) -> Result<CompactionOutcome, String> {
-    let keep_budget = 20_000_u64;
-    let mut kept_tokens = 0_u64;
-    let mut start = messages.len();
-    while start > 0 && kept_tokens < keep_budget {
-        start -= 1;
-        kept_tokens = kept_tokens.saturating_add(estimate_one_message_tokens(&messages[start]));
-    }
-    while start > 0 && !matches!(messages[start], AgentMessage::User(_)) {
-        start -= 1;
-    }
-    if start == 0 {
-        return Err("The session has no safe turn boundary to compact yet.".into());
-    }
-
-    let older = &messages[..start];
-    let retained_tail = messages[start..].to_vec();
-    let tokens_before = estimate_message_tokens(&messages);
-    let serialized = serde_json::to_string(older).map_err(|error| error.to_string())?;
-    let context = LlmContext {
-        system_prompt: Some(COMPACTION_PROMPT.into()),
-        messages: vec![LlmMessage {
-            role: "user".into(),
-            content: Some(Value::String(serialized)),
-            tool_call_id: None,
-            is_error: None,
-        }],
-        tools: Vec::new(),
-    };
-    let stream = stream_fn(
-        model,
-        context,
-        StreamOptions {
-            api_key,
-            max_output_tokens: Some(4_096),
-            provider_options: None,
-        },
-        CancellationToken::new(),
-    )
-    .await;
-    let mut events = stream.into_stream();
-    while let Some(event) = events.next().await {
-        match event {
-            AssistantMessageEvent::Done { message, reason }
-                if !matches!(reason, StopReason::Error | StopReason::Aborted) =>
-            {
-                let summary = assistant_text(&message).trim().to_string();
-                if summary.is_empty() {
-                    return Err("The model returned an empty summary.".into());
-                }
-                let record = CompactionRecord {
-                    summary: summary.clone(),
-                    first_kept_entry_id: None,
-                    tokens_before,
-                    retained_tail: retained_tail.clone(),
-                    details: None,
-                };
-                let mut compacted = vec![AgentMessage::User(UserMessage::new(format!(
-                    "[Summary of earlier session context]\n{summary}"
-                )))];
-                compacted.extend(retained_tail);
-                return Ok(CompactionOutcome {
-                    record,
-                    messages: compacted,
-                });
-            }
-            AssistantMessageEvent::Error { error, .. } => {
-                return Err(error
-                    .error_message
-                    .unwrap_or_else(|| "The model could not summarize this session.".into()));
-            }
-            _ => {}
-        }
-    }
-    Err("The compaction stream ended before producing a session summary.".into())
-}
-
-fn current_context_limit(model_id: &str) -> u64 {
-    load_connected_catalog_from_disk()
+fn current_model_limits(model: &Model) -> (u64, u64) {
+    load_provider_catalog_from_disk(&model.provider)
         .ok()
-        .and_then(|(catalog, _)| {
+        .and_then(|catalog| {
             catalog
                 .models
                 .into_iter()
-                .find(|model| model.id == model_id)
-                .map(|model| model.context_limit)
+                .find(|candidate| candidate.id == model.id)
+                .map(|candidate| (candidate.context_limit, candidate.output_limit))
         })
-        .unwrap_or(128_000)
-}
-
-fn estimate_message_tokens(messages: &[AgentMessage]) -> u64 {
-    messages
-        .iter()
-        .map(estimate_one_message_tokens)
-        .sum()
+        .unwrap_or((128_000, 8_192))
 }
 
 fn first_user_text(messages: &[AgentMessage]) -> Option<String> {
@@ -816,12 +876,6 @@ fn first_user_text(messages: &[AgentMessage]) -> Option<String> {
         AgentMessage::User(user) => user.content.as_str().map(str::to_string),
         _ => None,
     })
-}
-
-fn estimate_one_message_tokens(message: &AgentMessage) -> u64 {
-    serde_json::to_vec(message)
-        .map(|value| (value.len() as u64).div_ceil(4))
-        .unwrap_or(0)
 }
 
 fn parse_generated_title(raw: &str) -> Option<String> {
@@ -906,7 +960,8 @@ fn hydrate_chat(chat: &mut ViewportState, messages: &[AgentMessage]) {
                 }
                 for content in &message.content {
                     if let AssistantContent::ToolCall(call) = content {
-                        let index = chat.start_tool(&call.name, format_tool_args(&call.arguments));
+                        let index = chat
+                            .start_tool(&call.name, format_tool_args(&call.name, &call.arguments));
                         tool_indices.insert(call.id.clone(), index);
                     }
                 }
@@ -957,9 +1012,7 @@ fn message_key(message: &AgentMessage) -> String {
 }
 
 #[cfg(test)]
-async fn collect_agent_events(
-    mut handle: AgentLoopHandle,
-) -> (Vec<AgentEvent>, Vec<AgentMessage>) {
+async fn collect_agent_events(mut handle: AgentLoopHandle) -> (Vec<AgentEvent>, Vec<AgentMessage>) {
     let mut events = Vec::new();
     let mut result = handle.result;
     loop {
@@ -993,12 +1046,35 @@ fn assistant_text(message: &AssistantMessage) -> String {
         .join("")
 }
 
-fn format_tool_args(args: &Value) -> String {
-    serde_json::to_string(args).unwrap_or_else(|_| "{}".into())
+fn format_tool_args(tool_name: &str, args: &Value) -> String {
+    let primary = match tool_name {
+        "bash" => args.get("command").and_then(Value::as_str),
+        "read" | "write" => args.get("path").and_then(Value::as_str),
+        _ => None,
+    };
+    primary
+        .map(single_line)
+        .unwrap_or_else(|| serde_json::to_string(args).unwrap_or_else(|_| "{}".into()))
+}
+
+fn single_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn extract_first_bold(text: &str) -> Option<String> {
+    let start = text.find("**")?.saturating_add(2);
+    let rest = text.get(start..)?;
+    let end = rest.find("**")?;
+    let header = rest.get(..end)?.trim();
+    (!header.is_empty()).then(|| header.to_string())
 }
 
 pub fn install_default_stream_fn() {
-    use crate::backend::opencode::{opencode_stream_fn, OpenCodeStreamConfig};
+    use crate::backend::opencode::{OpenCodeStreamConfig, opencode_stream_fn};
     let client = reqwest::Client::new();
     let config = OpenCodeStreamConfig {
         client,
@@ -1010,7 +1086,7 @@ pub fn install_default_stream_fn() {
 #[cfg(test)]
 pub fn test_stream_fn() -> StreamFn {
     use crate::backend::agent::{
-        assistant_message, assistant_message_stream, AssistantMessageEvent, StopReason, TextContent,
+        AssistantMessageEvent, StopReason, TextContent, assistant_message, assistant_message_stream,
     };
     Arc::new(|_model, _context, _options, _cancel| {
         Box::pin(async move {
@@ -1032,19 +1108,93 @@ pub fn test_stream_fn() -> StreamFn {
 #[cfg(test)]
 mod tests {
     use super::{
+        AgentSession, build_system_prompt, extract_first_bold, format_tool_args,
         lowest_title_reasoning_variant, parse_generated_title, test_stream_fn,
-        text_generation_model, AgentSession,
+        text_generation_model,
     };
     use crate::backend::agent::{
-        assistant_message, assistant_message_stream, AssistantContent, AssistantMessageEvent,
-        StopReason, StreamFn, TextContent,
+        AgentMessage, AssistantContent, AssistantMessageEvent, StopReason, StreamFn, TextContent,
+        ToolCall, assistant_message, assistant_message_stream,
     };
-    use crate::frontend::chat::{Role, ViewportState};
-    use crate::backend::opencode::types::{ProviderOptions, ReasoningVariant, ReasoningVariantKind};
+    use crate::backend::opencode::types::{
+        ProviderOptions, ReasoningVariant, ReasoningVariantKind,
+    };
     use crate::config::RaidSettings;
+    use crate::frontend::chat::{Role, ViewportState};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn system_prompt_identifies_the_current_workspace() {
+        let prompt = build_system_prompt(std::path::Path::new("/tmp/raid-workspace"));
+
+        assert!(prompt.ends_with("Current working directory: /tmp/raid-workspace"));
+    }
+
+    #[test]
+    fn reasoning_status_uses_the_first_complete_bold_heading() {
+        assert_eq!(extract_first_bold("still thinking"), None);
+        assert_eq!(extract_first_bold("**Inspecting files"), None);
+        assert_eq!(
+            extract_first_bold("**Inspecting files**\nMore reasoning **later**").as_deref(),
+            Some("Inspecting files")
+        );
+    }
+
+    #[test]
+    fn interrupt_cancels_the_active_run() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut session = AgentSession::new(rt.handle().clone()).with_stream_fn(test_stream_fn());
+        session.submit("hello".into());
+
+        assert!(session.interrupt());
+        assert!(session.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn tool_only_assistant_turn_does_not_create_an_empty_chat_row() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut session = AgentSession::new(rt.handle().clone());
+        let mut chat = ViewportState::default();
+        let message = assistant_message(
+            vec![AssistantContent::ToolCall(ToolCall::new(
+                "call-1",
+                "bash",
+                serde_json::json!({ "command": "ls -la" }),
+            ))],
+            StopReason::ToolUse,
+        );
+
+        session.on_message_start(&mut chat, AgentMessage::Assistant(message.clone()));
+        session.on_message_end(&mut chat, AgentMessage::Assistant(message));
+
+        assert!(chat.is_empty());
+    }
+
+    #[test]
+    fn tool_headers_show_primary_arguments_instead_of_json() {
+        assert_eq!(
+            format_tool_args(
+                "bash",
+                &serde_json::json!({ "command": "find src\n-type f", "timeout": 30 }),
+            ),
+            "find src -type f"
+        );
+        assert_eq!(
+            format_tool_args(
+                "write",
+                &serde_json::json!({ "path": "src/main.rs", "content": "secret body" }),
+            ),
+            "src/main.rs"
+        );
+    }
 
     struct TestDir(PathBuf);
 
@@ -1140,9 +1290,7 @@ mod tests {
     #[test]
     fn generated_title_extracts_wrapped_json() {
         assert_eq!(
-            parse_generated_title(
-                "Here is the title:\n{\"title\":\"Initial Greeting\"}\nDone."
-            ),
+            parse_generated_title("Here is the title:\n{\"title\":\"Initial Greeting\"}\nDone."),
             Some("Initial Greeting".into())
         );
     }
@@ -1249,20 +1397,28 @@ mod tests {
             .with_session_root(root.0.clone());
         session.start_session("please repair all the broken session storage paths");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while session.title_task.as_ref().is_some_and(|task| !task.is_finished())
+        while session
+            .title_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
             && std::time::Instant::now() < deadline
         {
             std::thread::yield_now();
         }
         session.poll_title();
         let store = session.store.as_ref().expect("session store");
-        assert_eq!(store.metadata().expect("metadata").title, "Repair Session Storage");
-        assert!(store
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("repair-session-storage--"));
+        assert_eq!(
+            store.metadata().expect("metadata").title,
+            "Repair Session Storage"
+        );
+        assert!(
+            store
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("repair-session-storage--")
+        );
     }
 
     #[test]

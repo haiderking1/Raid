@@ -117,7 +117,8 @@ mod tests {
         assert!(rows[1].contains("└ Running"));
         assert!(rows[2].contains("Read(Cargo.toml)"));
         assert!(rows[3].contains("└"));
-        assert!(rows[3].contains("ctrl+r"));
+        assert!(rows[3].contains("Read"));
+        assert!(!rows[3].contains("ctrl+"));
     }
 
     #[test]

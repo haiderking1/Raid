@@ -22,6 +22,11 @@ pub static COMMANDS: &[SlashCommand] = &[
         argument: None,
     },
     SlashCommand {
+        name: "compact",
+        description: "Compact older session context",
+        argument: Some("[focus]"),
+    },
+    SlashCommand {
         name: "new",
         description: "Start a new session",
         argument: None,

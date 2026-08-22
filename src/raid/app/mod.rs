@@ -6,11 +6,15 @@ mod session;
 
 pub use agent::install_default_stream_fn;
 
+use crate::frontend::activity::ActivityIndicator;
 use crate::frontend::chat::{MarkdownCache, Role, ViewportState};
 use crate::frontend::composer::{ComposerAction, ComposerState, ComposerWidget};
 use crate::frontend::connect::{ConnectPanelStep, ConnectPanelWidget};
-use crate::frontend::model::{model_input_wrap_width, model_palette_height, ModelPaletteWidget};
-use crate::frontend::session::{session_input_wrap_width, session_palette_height, SessionPaletteWidget};
+use crate::frontend::model::{ModelPaletteWidget, model_input_wrap_width, model_palette_height};
+use crate::frontend::session::{
+    SessionPaletteWidget, session_input_wrap_width, session_palette_height,
+};
+use crate::frontend::status_line::StatusLineWidget;
 use agent::AgentSession;
 use connect::{ConnectAction, ConnectFlow};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -23,6 +27,7 @@ pub struct App {
     composer: ComposerState,
     chat: ViewportState,
     cache: MarkdownCache,
+    activity: ActivityIndicator,
     last_chat_width: usize,
     last_chat_height: usize,
     agent: AgentSession,
@@ -73,6 +78,7 @@ impl App {
             composer: ComposerState::default(),
             chat: ViewportState::default(),
             cache: MarkdownCache::default(),
+            activity: ActivityIndicator::default(),
             last_chat_width: 0,
             last_chat_height: 0,
             agent,
@@ -99,8 +105,14 @@ impl App {
     }
 
     #[cfg(test)]
-    pub fn with_stream_fn(runtime: tokio::runtime::Handle, stream_fn: crate::backend::agent::StreamFn) -> Self {
-        Self::with_agent(AgentSession::new(runtime.clone()).with_stream_fn(stream_fn), runtime)
+    pub fn with_stream_fn(
+        runtime: tokio::runtime::Handle,
+        stream_fn: crate::backend::agent::StreamFn,
+    ) -> Self {
+        Self::with_agent(
+            AgentSession::new(runtime.clone()).with_stream_fn(stream_fn),
+            runtime,
+        )
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, content_width: usize) -> AppAction {
@@ -114,8 +126,15 @@ impl App {
             return self.handle_session_key(key, content_width);
         }
 
+        if key.code == KeyCode::Esc && self.agent.interrupt() {
+            return AppAction::None;
+        }
         if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.start_session_picker();
+            return AppAction::None;
+        }
+        if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.chat.toggle_tool_details();
             return AppAction::None;
         }
         if key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -149,7 +168,7 @@ impl App {
                     self.agent.submit(message);
                     AppAction::None
                 }
-                ComposerAction::Command { name, .. } => {
+                ComposerAction::Command { name, args } => {
                     match name.as_str() {
                         "connect" => {
                             self.connect.start();
@@ -161,10 +180,15 @@ impl App {
                             self.model.apply_filter(self.composer.text());
                         }
                         "text-model" => {
-                            self.model
-                                .start(&self.runtime, ModelTarget::TextGeneration);
+                            self.model.start(&self.runtime, ModelTarget::TextGeneration);
                             self.composer = ComposerState::default();
                             self.model.apply_filter(self.composer.text());
+                        }
+                        "compact" => {
+                            self.composer = ComposerState::default();
+                            if let Err(error) = self.agent.compact(args) {
+                                self.chat.push(Role::Assistant, error);
+                            }
                         }
                         "new" => {
                             if let Err(error) = self.agent.new_session(&mut self.chat) {
@@ -199,9 +223,7 @@ impl App {
     }
 
     fn handle_model_key(&mut self, key: KeyEvent, content_width: usize) -> AppAction {
-        let width = model_input_wrap_width(
-            self.last_chat_width.max(content_width) as u16 + 3,
-        )
+        let width = model_input_wrap_width(self.last_chat_width.max(content_width) as u16 + 3)
             .max(content_width);
         match self.model.handle_key(&mut self.composer, key, width) {
             ModelAction::None => AppAction::None,
@@ -227,10 +249,8 @@ impl App {
     }
 
     fn handle_session_key(&mut self, key: KeyEvent, content_width: usize) -> AppAction {
-        let width = session_input_wrap_width(
-            self.last_chat_width.max(content_width) as u16 + 3,
-        )
-        .max(content_width);
+        let width = session_input_wrap_width(self.last_chat_width.max(content_width) as u16 + 3)
+            .max(content_width);
         match self.session.handle_key(&mut self.composer, key, width) {
             SessionAction::None => AppAction::None,
             SessionAction::Cancelled => {
@@ -298,8 +318,7 @@ impl App {
                 let width = self.last_chat_width.max(1);
                 let view = self.last_chat_height.max(1);
                 let height = self.chat.content_height(&mut self.cache, width);
-                self.chat
-                    .scroll_up(MOUSE_SCROLL_LINES, height, view);
+                self.chat.scroll_up(MOUSE_SCROLL_LINES, height, view);
             }
             MouseEventKind::ScrollDown => self.chat.scroll_down(MOUSE_SCROLL_LINES),
             _ => {}
@@ -310,7 +329,10 @@ impl App {
         self.model.poll(&self.runtime);
         self.agent.poll(&mut self.chat);
         if self.session.active() {
-            let current = self.agent.current_session_path().map(|path| path.to_path_buf());
+            let current = self
+                .agent
+                .current_session_path()
+                .map(|path| path.to_path_buf());
             if self.session.current() != current.as_deref() {
                 self.session
                     .start_loading(self.agent.scan_sessions(), current.as_deref());
@@ -320,47 +342,66 @@ impl App {
     }
 
     pub fn draw(&mut self, frame: &mut Frame) -> usize {
+        self.activity.sync(self.agent.activity_header());
         let area = frame.area();
         if area.width < 5 || area.height < 4 {
             return 0;
         }
-        let padded = Rect {
+        let body = Rect {
             x: area.x,
             y: area.y,
             width: area.width,
             height: area.height.saturating_sub(1),
         };
+        let status = Rect {
+            x: area.x,
+            y: area.bottom().saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
 
-        if self.connect.active() {
-            return self.draw_connect(frame, padded);
-        }
-        if self.model.active() {
-            return self.draw_model(frame, padded);
-        }
-        if self.session.active() {
-            return self.draw_session(frame, padded);
-        }
+        let content_width = if self.connect.active() {
+            self.draw_connect(frame, body)
+        } else if self.model.active() {
+            self.draw_model(frame, body)
+        } else if self.session.active() {
+            self.draw_session(frame, body)
+        } else {
+            let layout = shell_layout(body, &self.composer, 0);
 
-        let layout = shell_layout(padded, &self.composer, 0);
+            if layout.chat.height > 0 {
+                let width = layout.chat.width as usize;
+                self.last_chat_width = width;
+                self.last_chat_height = layout.chat.height as usize;
+                frame.render_widget(self.chat.widget(&mut self.cache, width.max(1)), layout.chat);
+            }
+            frame.render_widget(ComposerWidget::new(&self.composer), layout.composer);
+            if let (Some(area), Some(widget)) = (layout.thinking, self.activity.widget()) {
+                frame.render_widget(widget, area);
+            }
+            if let (Some(area), Some(widget)) = (layout.palette, self.composer.palette_widget()) {
+                frame.render_widget(widget, area);
+            }
+            layout.content_width
+        };
 
-        if layout.chat.height > 0 {
-            let width = layout.chat.width as usize;
-            self.last_chat_width = width;
-            self.last_chat_height = layout.chat.height as usize;
-            frame.render_widget(self.chat.widget(&mut self.cache, width.max(1)), layout.chat);
-        }
-        frame.render_widget(ComposerWidget::new(&self.composer), layout.composer);
-        if let (Some(area), Some(widget)) = (layout.palette, self.composer.palette_widget()) {
-            frame.render_widget(widget, area);
-        }
-        layout.content_width
+        let (context_tokens, context_limit) = self.agent.context_usage();
+        frame.render_widget(
+            StatusLineWidget::new(
+                self.agent.model_id(),
+                context_tokens,
+                context_limit,
+                self.agent.thinking_level(),
+                self.agent.project_path(),
+            ),
+            status,
+        );
+        content_width
     }
 
     fn draw_model(&mut self, frame: &mut Frame, area: Rect) -> usize {
-        let palette_height = model_palette_height(
-            self.model.filtered().len(),
-            area.height.saturating_sub(2),
-        );
+        let palette_height =
+            model_palette_height(self.model.filtered().len(), area.height.saturating_sub(2));
         let palette = Rect {
             x: area.x,
             y: area.y + area.height.saturating_sub(palette_height),
@@ -436,10 +477,8 @@ impl App {
     }
 
     fn draw_session(&mut self, frame: &mut Frame, area: Rect) -> usize {
-        let palette_height = session_palette_height(
-            self.session.filtered().len(),
-            area.height.saturating_sub(2),
-        );
+        let palette_height =
+            session_palette_height(self.session.filtered().len(), area.height.saturating_sub(2));
         let palette = Rect {
             x: area.x,
             y: area.y + area.height.saturating_sub(palette_height),
@@ -491,9 +530,7 @@ mod tests {
     use super::{App, AppAction};
     use crate::app::agent::test_stream_fn;
     use crate::frontend::chat::Role;
-    use crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
-    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -556,6 +593,18 @@ mod tests {
         assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
         assert!(app.model_active());
         assert_eq!(app.chat.last_role(), None);
+    }
+
+    #[test]
+    fn compact_command_reports_when_the_session_is_empty() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
+
+        app.insert_paste("/compact");
+        assert_eq!(app.handle_key(key(KeyCode::Enter), 40), AppAction::None);
+
+        assert_eq!(app.chat.last_role(), Some(Role::Assistant));
+        assert!(!app.agent.is_running());
     }
 
     #[test]
@@ -624,5 +673,21 @@ mod tests {
         assert_eq!(app.chat.scroll_from_bottom(), 3);
         app.handle_mouse(mouse(MouseEventKind::ScrollDown));
         assert_eq!(app.chat.scroll_from_bottom(), 0);
+    }
+
+    #[test]
+    fn ctrl_o_toggles_long_tool_results() {
+        let rt = runtime();
+        let mut app = App::with_stream_fn(rt.handle().clone(), test_stream_fn());
+        let index = app.chat.start_tool("bash", "ls -la");
+        app.chat
+            .finish_tool(index, crate::frontend::tools::ToolStatus::Success, ".git\nsrc");
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            40,
+        );
+
+        assert!(app.chat.tool_details_expanded());
     }
 }

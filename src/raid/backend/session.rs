@@ -105,6 +105,7 @@ pub struct SessionEntry {
 pub struct SessionSnapshot {
     pub metadata: SessionMetadata,
     pub active_messages: Vec<AgentMessage>,
+    pub display_messages: Vec<AgentMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,9 +273,16 @@ impl SessionStore {
         Ok(id)
     }
 
-    #[allow(dead_code)]
     pub fn append_compaction(&mut self, record: &CompactionRecord) -> Result<String, SessionError> {
-        let payload = serde_json::to_value(record)?;
+        let mut stored = record.clone();
+        if stored.first_kept_entry_id.is_none()
+            && let Some(first_kept) = stored.retained_tail.first()
+            && let Some(entry_id) = find_active_message_entry_id(self.connection_ref()?, first_kept)?
+        {
+            stored.first_kept_entry_id = Some(entry_id);
+            stored.retained_tail.clear();
+        }
+        let payload = serde_json::to_value(stored)?;
         self.append_entry("compaction", None, &payload, now_ms(), None)
     }
 
@@ -568,9 +576,11 @@ fn load_snapshot(connection: &Connection) -> Result<SessionSnapshot, SessionErro
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let active_messages = build_active_messages(&entries, metadata.last_entry_id.as_deref())?;
+    let display_messages = build_display_messages(&entries, metadata.last_entry_id.as_deref())?;
     Ok(SessionSnapshot {
         metadata,
         active_messages,
+        display_messages,
     })
 }
 
@@ -611,25 +621,7 @@ fn build_active_messages(
     entries: &[SessionEntry],
     leaf_id: Option<&str>,
 ) -> Result<Vec<AgentMessage>, SessionError> {
-    let by_id = entries
-        .iter()
-        .map(|entry| (entry.id.as_str(), entry))
-        .collect::<HashMap<_, _>>();
-    let mut path = Vec::new();
-    let mut cursor = leaf_id;
-    let mut visited = HashSet::new();
-    while let Some(id) = cursor {
-        if !visited.insert(id.to_string()) {
-            return Err(SessionError::Corrupt("session entry tree contains a cycle".into()));
-        }
-        let entry = by_id
-            .get(id)
-            .copied()
-            .ok_or_else(|| SessionError::Corrupt(format!("session entry {id} is missing")))?;
-        path.push(entry);
-        cursor = entry.parent_id.as_deref();
-    }
-    path.reverse();
+    let path = active_path(entries, leaf_id)?;
 
     let latest_compaction = path
         .iter()
@@ -671,6 +663,72 @@ fn build_active_messages(
         }
     }
     Ok(messages)
+}
+
+fn build_display_messages(
+    entries: &[SessionEntry],
+    leaf_id: Option<&str>,
+) -> Result<Vec<AgentMessage>, SessionError> {
+    active_path(entries, leaf_id)?
+        .into_iter()
+        .filter(|entry| entry.kind == "message")
+        .map(|entry| serde_json::from_value(entry.payload.clone()).map_err(SessionError::from))
+        .collect()
+}
+
+fn active_path<'a>(
+    entries: &'a [SessionEntry],
+    leaf_id: Option<&str>,
+) -> Result<Vec<&'a SessionEntry>, SessionError> {
+    let by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut path = Vec::new();
+    let mut cursor = leaf_id;
+    let mut visited = HashSet::new();
+    while let Some(id) = cursor {
+        if !visited.insert(id.to_string()) {
+            return Err(SessionError::Corrupt("session entry tree contains a cycle".into()));
+        }
+        let entry = by_id
+            .get(id)
+            .copied()
+            .ok_or_else(|| SessionError::Corrupt(format!("session entry {id} is missing")))?;
+        path.push(entry);
+        cursor = entry.parent_id.as_deref();
+    }
+    path.reverse();
+    Ok(path)
+}
+
+fn find_active_message_entry_id(
+    connection: &Connection,
+    message: &AgentMessage,
+) -> Result<Option<String>, SessionError> {
+    let mut statement = connection.prepare(
+        "WITH RECURSIVE active(id, parent_id, kind, payload_json, depth) AS (
+             SELECT id, parent_id, kind, payload_json, 0
+             FROM entries
+             WHERE id = (SELECT last_entry_id FROM session WHERE singleton = 1)
+             UNION ALL
+             SELECT entry.id, entry.parent_id, entry.kind, entry.payload_json, active.depth + 1
+             FROM entries AS entry
+             JOIN active ON entry.id = active.parent_id
+         )
+         SELECT id, payload_json FROM active WHERE kind = 'message' ORDER BY depth",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, payload) = row?;
+        let candidate: AgentMessage = serde_json::from_str(&payload)?;
+        if candidate == *message {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 fn append_entry_in_transaction(
@@ -1012,8 +1070,8 @@ fn create_private_file(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_active_messages, project_directory_name, session_summaries, CompactionRecord,
-        SessionEntry, SessionError, SessionStore,
+        build_active_messages, build_display_messages, project_directory_name, session_summaries,
+        CompactionRecord, SessionEntry, SessionError, SessionStore,
     };
     use crate::backend::agent::{AgentMessage, UserMessage};
     use std::path::{Path, PathBuf};
@@ -1318,6 +1376,85 @@ mod tests {
             .expect("active messages");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1], kept);
+
+        let first = AgentMessage::User(UserMessage::new("old"));
+        let kept = AgentMessage::User(UserMessage::new("kept"));
+        let entries = vec![
+            SessionEntry {
+                sequence: 1,
+                id: "one".into(),
+                parent_id: None,
+                kind: "message".into(),
+                role: Some("user".into()),
+                payload: serde_json::to_value(&first).expect("first payload"),
+                created_at: 1,
+            },
+            SessionEntry {
+                sequence: 2,
+                id: "two".into(),
+                parent_id: Some("one".into()),
+                kind: "message".into(),
+                role: Some("user".into()),
+                payload: serde_json::to_value(&kept).expect("kept payload"),
+                created_at: 2,
+            },
+            SessionEntry {
+                sequence: 3,
+                id: "three".into(),
+                parent_id: Some("two".into()),
+                kind: "compaction".into(),
+                role: None,
+                payload: serde_json::to_value(CompactionRecord {
+                    summary: "summary".into(),
+                    first_kept_entry_id: Some("two".into()),
+                    tokens_before: 100,
+                    retained_tail: Vec::new(),
+                    details: None,
+                })
+                .expect("compaction payload"),
+                created_at: 3,
+            },
+        ];
+        let display = build_display_messages(&entries, Some("three")).expect("display messages");
+        assert_eq!(display, [first, kept]);
+    }
+
+    #[test]
+    fn compaction_references_the_retained_tail_without_duplicating_it() {
+        let root = TestDir::new();
+        let project = root.0.join("project");
+        std::fs::create_dir_all(&project).expect("project");
+        let mut store = create(&root.0, &project);
+        let old = AgentMessage::User(UserMessage::new("old"));
+        let kept = AgentMessage::User(UserMessage::new("kept"));
+        store.append_message(&old).expect("old message");
+        let kept_id = store.append_message(&kept).expect("kept message");
+        store
+            .append_compaction(&CompactionRecord {
+                summary: "checkpoint".into(),
+                first_kept_entry_id: None,
+                tokens_before: 100,
+                retained_tail: vec![kept.clone()],
+                details: None,
+            })
+            .expect("compaction");
+
+        let connection = rusqlite::Connection::open(store.path()).expect("connection");
+        let payload: String = connection
+            .query_row(
+                "SELECT payload_json FROM entries WHERE kind = 'compaction'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("compaction payload");
+        let record: CompactionRecord = serde_json::from_str(&payload).expect("record");
+        assert_eq!(record.first_kept_entry_id.as_deref(), Some(kept_id.as_str()));
+        assert!(record.retained_tail.is_empty());
+
+        let snapshot = store.snapshot().expect("snapshot");
+        assert_eq!(snapshot.active_messages.len(), 2);
+        assert_eq!(snapshot.active_messages[1], kept);
+        assert_eq!(snapshot.display_messages, [old, kept]);
     }
 
     #[cfg(unix)]
